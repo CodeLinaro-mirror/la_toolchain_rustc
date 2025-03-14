@@ -1,7 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::values::values_for_pass;
+use itertools::Itertools as _;
+
+use crate::format::Indentation;
+use crate::values::value_for_array;
 use crate::Language;
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -25,7 +28,7 @@ impl FromStr for TypeKind {
             "poly" => Ok(Self::Poly),
             "uint" | "unsigned" => Ok(Self::UInt),
             "void" => Ok(Self::Void),
-            _ => Err(format!("Impossible to parse argument kind {}", s)),
+            _ => Err(format!("Impossible to parse argument kind {s}")),
         }
     }
 }
@@ -110,11 +113,11 @@ impl IntrinsicType {
     /// pointers, i.e. a pointer to a u16 would be 16 rather than the size
     /// of a pointer.
     pub fn inner_size(&self) -> u32 {
-        match *self {
-            IntrinsicType::Ptr { ref child, .. } => child.inner_size(),
+        match self {
+            IntrinsicType::Ptr { child, .. } => child.inner_size(),
             IntrinsicType::Type {
                 bit_len: Some(bl), ..
-            } => bl,
+            } => *bl,
             _ => unreachable!(""),
         }
     }
@@ -160,8 +163,7 @@ impl IntrinsicType {
         }
     }
 
-    #[allow(unused)]
-    fn c_scalar_type(&self) -> String {
+    pub fn c_scalar_type(&self) -> String {
         format!(
             "{prefix}{bits}_t",
             prefix = self.kind().c_prefix(),
@@ -169,7 +171,7 @@ impl IntrinsicType {
         )
     }
 
-    fn rust_scalar_type(&self) -> String {
+    pub fn rust_scalar_type(&self) -> String {
         format!(
             "{prefix}{bits}",
             prefix = self.kind().rust_prefix(),
@@ -200,14 +202,14 @@ impl IntrinsicType {
                 simd_len: Some(simd_len),
                 vec_len: None,
                 ..
-            } => format!("{}{}x{}_t", kind.c_prefix(), bit_len, simd_len),
+            } => format!("{}{bit_len}x{simd_len}_t", kind.c_prefix()),
             IntrinsicType::Type {
                 kind,
                 bit_len: Some(bit_len),
                 simd_len: Some(simd_len),
                 vec_len: Some(vec_len),
                 ..
-            } => format!("{}{}x{}x{}_t", kind.c_prefix(), bit_len, simd_len, vec_len),
+            } => format!("{}{bit_len}x{simd_len}x{vec_len}_t", kind.c_prefix()),
             _ => todo!("{:#?}", self),
         }
     }
@@ -221,7 +223,7 @@ impl IntrinsicType {
                 simd_len: Some(simd_len),
                 vec_len: Some(_),
                 ..
-            } => format!("{}{}x{}_t", kind.c_prefix(), bit_len, simd_len),
+            } => format!("{}{bit_len}x{simd_len}_t", kind.c_prefix()),
             _ => unreachable!("Shouldn't be called on this type"),
         }
     }
@@ -235,21 +237,21 @@ impl IntrinsicType {
                 simd_len: None,
                 vec_len: None,
                 ..
-            } => format!("{}{}", kind.rust_prefix(), bit_len),
+            } => format!("{}{bit_len}", kind.rust_prefix()),
             IntrinsicType::Type {
                 kind,
                 bit_len: Some(bit_len),
                 simd_len: Some(simd_len),
                 vec_len: None,
                 ..
-            } => format!("{}{}x{}_t", kind.c_prefix(), bit_len, simd_len),
+            } => format!("{}{bit_len}x{simd_len}_t", kind.c_prefix()),
             IntrinsicType::Type {
                 kind,
                 bit_len: Some(bit_len),
                 simd_len: Some(simd_len),
                 vec_len: Some(vec_len),
                 ..
-            } => format!("{}{}x{}x{}_t", kind.c_prefix(), bit_len, simd_len, vec_len),
+            } => format!("{}{bit_len}x{simd_len}x{vec_len}_t", kind.c_prefix()),
             _ => todo!("{:#?}", self),
         }
     }
@@ -289,89 +291,93 @@ impl IntrinsicType {
         }
     }
 
-    /// Generates a comma list of values that can be used to initialize an
-    /// argument for the intrinsic call.
+    /// Generates an initialiser for an array, which can be used to initialise an argument for the
+    /// intrinsic call.
+    ///
     /// This is determistic based on the pass number.
     ///
-    /// * `pass`: The pass index, i.e. the iteration index for the call to an intrinsic
+    /// * `loads`: The number of values that need to be loaded from the argument array
+    /// * e.g for argument type uint32x2, loads=2 results in a string representing 4 32-bit values
     ///
     /// Returns a string such as
-    /// * `0x1, 0x7F, 0xFF` if `language` is `Language::C`
-    /// * `0x1 as _, 0x7F as _, 0xFF as _` if `language` is `Language::Rust`
-    pub fn populate_random(&self, pass: usize, language: &Language) -> String {
+    /// * `{0x1, 0x7F, 0xFF}` if `language` is `Language::C`
+    /// * `[0x1 as _, 0x7F as _, 0xFF as _]` if `language` is `Language::Rust`
+    pub fn populate_random(
+        &self,
+        indentation: Indentation,
+        loads: u32,
+        language: &Language,
+    ) -> String {
         match self {
-            IntrinsicType::Ptr { child, .. } => child.populate_random(pass, language),
+            IntrinsicType::Ptr { child, .. } => child.populate_random(indentation, loads, language),
             IntrinsicType::Type {
-                bit_len: Some(bit_len),
-                kind,
+                bit_len: Some(bit_len @ (8 | 16 | 32 | 64)),
+                kind: kind @ (TypeKind::Int | TypeKind::UInt | TypeKind::Poly),
                 simd_len,
                 vec_len,
                 ..
-            } if kind == &TypeKind::Int || kind == &TypeKind::UInt || kind == &TypeKind::Poly => (0
-                ..(simd_len.unwrap_or(1) * vec_len.unwrap_or(1)))
-                .map(|i| {
-                    format!(
-                        "{}{}",
-                        values_for_pass(*bit_len, i, pass),
-                        match language {
-                            &Language::Rust => format!(" as {ty} ", ty = self.rust_scalar_type()),
-                            &Language::C => String::from(""),
-                        }
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-            IntrinsicType::Type {
-                kind: TypeKind::Float,
-                bit_len: Some(32),
-                simd_len,
-                vec_len,
-                ..
-            } => (0..(simd_len.unwrap_or(1) * vec_len.unwrap_or(1)))
-                .map(|i| {
-                    format!(
-                        "{}({})",
-                        match language {
-                            &Language::Rust => "f32::from_bits",
-                            &Language::C => "cast<float, uint32_t>",
-                        },
-                        values_for_pass(32, i, pass),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(","),
+            } => {
+                let (prefix, suffix) = match language {
+                    &Language::Rust => ("[", "]"),
+                    &Language::C => ("{", "}"),
+                };
+                let body_indentation = indentation.nested();
+                format!(
+                    "{prefix}\n{body}\n{indentation}{suffix}",
+                    body = (0..(simd_len.unwrap_or(1) * vec_len.unwrap_or(1) + loads - 1))
+                        .format_with(",\n", |i, fmt| {
+                            let src = value_for_array(*bit_len, i);
+                            assert!(src == 0 || src.ilog2() < *bit_len);
+                            if *kind == TypeKind::Int && (src >> (*bit_len - 1)) != 0 {
+                                // `src` is a two's complement representation of a negative value.
+                                let mask = !0u64 >> (64 - *bit_len);
+                                let ones_compl = src ^ mask;
+                                let twos_compl = ones_compl + 1;
+                                if (twos_compl == src) && (language == &Language::C) {
+                                    // `src` is INT*_MIN. C requires `-0x7fffffff - 1` to avoid
+                                    // undefined literal overflow behaviour.
+                                    fmt(&format_args!("{body_indentation}-{ones_compl:#x} - 1"))
+                                } else {
+                                    fmt(&format_args!("{body_indentation}-{twos_compl:#x}"))
+                                }
+                            } else {
+                                fmt(&format_args!("{body_indentation}{src:#x}"))
+                            }
+                        })
+                )
+            }
             IntrinsicType::Type {
                 kind: TypeKind::Float,
-                bit_len: Some(64),
+                bit_len: Some(bit_len @ (32 | 64)),
                 simd_len,
                 vec_len,
                 ..
-            } => (0..(simd_len.unwrap_or(1) * vec_len.unwrap_or(1)))
-                .map(|i| {
-                    format!(
-                        "{}({}{})",
-                        match language {
-                            &Language::Rust => "f64::from_bits",
-                            &Language::C => "cast<double, uint64_t>",
-                        },
-                        values_for_pass(64, i, pass),
-                        match language {
-                            &Language::Rust => " as u64",
-                            &Language::C => "",
-                        }
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-            _ => unreachable!("populate random: {:#?}", self),
+            } => {
+                let (prefix, cast_prefix, cast_suffix, suffix) = match (language, bit_len) {
+                    (&Language::Rust, 32) => ("[", "f32::from_bits(", ")", "]"),
+                    (&Language::Rust, 64) => ("[", "f64::from_bits(", ")", "]"),
+                    (&Language::C, 32) => ("{", "cast<float, uint32_t>(", ")", "}"),
+                    (&Language::C, 64) => ("{", "cast<double, uint64_t>(", ")", "}"),
+                    _ => unreachable!(),
+                };
+                format!(
+                    "{prefix}\n{body}\n{indentation}{suffix}",
+                    body = (0..(simd_len.unwrap_or(1) * vec_len.unwrap_or(1) + loads - 1))
+                        .format_with(",\n", |i, fmt| fmt(&format_args!(
+                            "{indentation}{cast_prefix}{src:#x}{cast_suffix}",
+                            indentation = indentation.nested(),
+                            src = value_for_array(*bit_len, i)
+                        )))
+                )
+            }
+            _ => unimplemented!("populate random: {:#?}", self),
         }
     }
 
     /// Determines the load function for this type.
-    #[allow(unused)]
-    pub fn get_load_function(&self) -> String {
+    pub fn get_load_function(&self, armv7_p64_workaround: bool) -> String {
         match self {
-            IntrinsicType::Ptr { child, .. } => child.get_load_function(),
+            IntrinsicType::Ptr { child, .. } => child.get_load_function(armv7_p64_workaround),
             IntrinsicType::Type {
                 kind: k,
                 bit_len: Some(bl),
@@ -379,7 +385,7 @@ impl IntrinsicType {
                 vec_len,
                 ..
             } => {
-                let quad = if (simd_len.unwrap_or(1) * bl) > 64 {
+                let quad = if simd_len.unwrap_or(1) * bl > 64 {
                     "q"
                 } else {
                     ""
@@ -390,7 +396,8 @@ impl IntrinsicType {
                         TypeKind::UInt => "u",
                         TypeKind::Int => "s",
                         TypeKind::Float => "f",
-                        TypeKind::Poly => "p",
+                        // The ACLE doesn't support 64-bit polynomial loads on Armv7
+                        TypeKind::Poly => if armv7_p64_workaround && *bl == 64 {"s"} else {"p"},
                         x => todo!("get_load_function TypeKind: {:#?}", x),
                     },
                     size = bl,
@@ -431,6 +438,69 @@ impl IntrinsicType {
                 )
             }
             _ => todo!("get_lane_function IntrinsicType: {:#?}", self),
+        }
+    }
+
+    pub fn from_c(s: &str) -> Result<IntrinsicType, String> {
+        const CONST_STR: &str = "const";
+        if let Some(s) = s.strip_suffix('*') {
+            let (s, constant) = match s.trim().strip_suffix(CONST_STR) {
+                Some(stripped) => (stripped, true),
+                None => (s, false),
+            };
+            let s = s.trim_end();
+            Ok(IntrinsicType::Ptr {
+                constant,
+                child: Box::new(IntrinsicType::from_c(s)?),
+            })
+        } else {
+            // [const ]TYPE[{bitlen}[x{simdlen}[x{vec_len}]]][_t]
+            let (mut s, constant) = match s.strip_prefix(CONST_STR) {
+                Some(stripped) => (stripped.trim(), true),
+                None => (s, false),
+            };
+            s = s.strip_suffix("_t").unwrap_or(s);
+            let mut parts = s.split('x'); // [[{bitlen}], [{simdlen}], [{vec_len}] ]
+            let start = parts.next().ok_or("Impossible to parse type")?;
+            if let Some(digit_start) = start.find(|c: char| c.is_ascii_digit()) {
+                let (arg_kind, bit_len) = start.split_at(digit_start);
+                let arg_kind = arg_kind.parse::<TypeKind>()?;
+                let bit_len = bit_len.parse::<u32>().map_err(|err| err.to_string())?;
+                let simd_len = match parts.next() {
+                    Some(part) => Some(
+                        part.parse::<u32>()
+                            .map_err(|_| "Couldn't parse simd_len: {part}")?,
+                    ),
+                    None => None,
+                };
+                let vec_len = match parts.next() {
+                    Some(part) => Some(
+                        part.parse::<u32>()
+                            .map_err(|_| "Couldn't parse vec_len: {part}")?,
+                    ),
+                    None => None,
+                };
+                Ok(IntrinsicType::Type {
+                    constant,
+                    kind: arg_kind,
+                    bit_len: Some(bit_len),
+                    simd_len,
+                    vec_len,
+                })
+            } else {
+                let kind = start.parse::<TypeKind>()?;
+                let bit_len = match kind {
+                    TypeKind::Int => Some(32),
+                    _ => None,
+                };
+                Ok(IntrinsicType::Type {
+                    constant,
+                    kind: start.parse::<TypeKind>()?,
+                    bit_len,
+                    simd_len: None,
+                    vec_len: None,
+                })
+            }
         }
     }
 }

@@ -17,8 +17,6 @@ use crate::FileRange;
 // Extends or shrinks the current selection to the encompassing syntactic construct
 // (expression, statement, item, module, etc). It works with multiple cursors.
 //
-// This is a standard LSP feature and not a protocol extension.
-//
 // |===
 // | Editor  | Shortcut
 //
@@ -28,18 +26,18 @@ use crate::FileRange;
 // image::https://user-images.githubusercontent.com/48062697/113020651-b42fc800-917a-11eb-8a4f-cf1a07859fac.gif[]
 pub(crate) fn extend_selection(db: &RootDatabase, frange: FileRange) -> TextRange {
     let sema = Semantics::new(db);
-    let src = sema.parse(frange.file_id);
+    let src = sema.parse_guess_edition(frange.file_id);
     try_extend_selection(&sema, src.syntax(), frange).unwrap_or(frange.range)
 }
 
 fn try_extend_selection(
-    sema: &Semantics<RootDatabase>,
+    sema: &Semantics<'_, RootDatabase>,
     root: &SyntaxNode,
     frange: FileRange,
 ) -> Option<TextRange> {
     let range = frange.range;
 
-    let string_kinds = [COMMENT, STRING, BYTE_STRING];
+    let string_kinds = [COMMENT, STRING, BYTE_STRING, C_STRING];
     let list_kinds = [
         RECORD_PAT_FIELD_LIST,
         MATCH_ARM_LIST,
@@ -110,7 +108,7 @@ fn try_extend_selection(
 
     let node = shallowest_node(&node);
 
-    if node.parent().map(|n| list_kinds.contains(&n.kind())) == Some(true) {
+    if node.parent().is_some_and(|n| list_kinds.contains(&n.kind())) {
         if let Some(range) = extend_list_item(&node) {
             return Some(range);
         }
@@ -120,7 +118,7 @@ fn try_extend_selection(
 }
 
 fn extend_tokens_from_range(
-    sema: &Semantics<RootDatabase>,
+    sema: &Semantics<'_, RootDatabase>,
     macro_call: ast::MacroCall,
     original_range: TextRange,
 ) -> Option<TextRange> {
@@ -142,8 +140,8 @@ fn extend_tokens_from_range(
 
     // compute original mapped token range
     let extended = {
-        let fst_expanded = sema.descend_into_macros_single(first_token.clone());
-        let lst_expanded = sema.descend_into_macros_single(last_token.clone());
+        let fst_expanded = sema.descend_into_macros_single_exact(first_token.clone());
+        let lst_expanded = sema.descend_into_macros_single_exact(last_token.clone());
         let mut lca =
             algo::least_common_ancestor(&fst_expanded.parent()?, &lst_expanded.parent()?)?;
         lca = shallowest_node(&lca);
@@ -154,13 +152,16 @@ fn extend_tokens_from_range(
     };
 
     // Compute parent node range
-    let validate = |token: &SyntaxToken| -> bool {
-        let expanded = sema.descend_into_macros_single(token.clone());
-        let parent = match expanded.parent() {
-            Some(it) => it,
-            None => return false,
-        };
-        algo::least_common_ancestor(&extended, &parent).as_ref() == Some(&extended)
+    let validate = || {
+        let extended = &extended;
+        move |token: &SyntaxToken| -> bool {
+            let expanded = sema.descend_into_macros_single_exact(token.clone());
+            let parent = match expanded.parent() {
+                Some(it) => it,
+                None => return false,
+            };
+            algo::least_common_ancestor(extended, &parent).as_ref() == Some(extended)
+        }
     };
 
     // Find the first and last text range under expanded parent
@@ -168,14 +169,14 @@ fn extend_tokens_from_range(
         let token = token.prev_token()?;
         skip_trivia_token(token, Direction::Prev)
     })
-    .take_while(validate)
+    .take_while(validate())
     .last()?;
 
     let last = successors(Some(last_token), |token| {
         let token = token.next_token()?;
         skip_trivia_token(token, Direction::Next)
     })
-    .take_while(validate)
+    .take_while(validate())
     .last()?;
 
     let range = first.text_range().cover(last.text_range());
@@ -205,9 +206,15 @@ fn extend_single_word_in_comment_or_string(
     }
 
     let start_idx = before.rfind(non_word_char)? as u32;
-    let end_idx = after.find(non_word_char).unwrap_or_else(|| after.len()) as u32;
+    let end_idx = after.find(non_word_char).unwrap_or(after.len()) as u32;
 
-    let from: TextSize = (start_idx + 1).into();
+    // FIXME: use `ceil_char_boundary` from `std::str` when it gets stable
+    // https://github.com/rust-lang/rust/issues/93743
+    fn ceil_char_boundary(text: &str, index: u32) -> u32 {
+        (index..).find(|&index| text.is_char_boundary(index as usize)).unwrap_or(text.len() as u32)
+    }
+
+    let from: TextSize = ceil_char_boundary(text, start_idx + 1).into();
     let to: TextSize = (cursor_position + end_idx).into();
 
     let range = TextRange::new(from, to);
@@ -246,7 +253,7 @@ fn pick_best(l: SyntaxToken, r: SyntaxToken) -> SyntaxToken {
     fn priority(n: &SyntaxToken) -> usize {
         match n.kind() {
             WHITESPACE => 0,
-            IDENT | T![self] | T![super] | T![crate] | LIFETIME_IDENT => 2,
+            IDENT | T![self] | T![super] | T![crate] | T![Self] | LIFETIME_IDENT => 2,
             _ => 1,
         }
     }
@@ -283,7 +290,7 @@ fn extend_list_item(node: &SyntaxNode) -> Option<TextRange> {
         let final_node = delimiter_node
             .next_sibling_or_token()
             .and_then(|it| it.into_token())
-            .filter(|node| is_single_line_ws(node))
+            .filter(is_single_line_ws)
             .unwrap_or(delimiter_node);
 
         return Some(TextRange::new(node.text_range().start(), final_node.text_range().end()));
@@ -656,6 +663,20 @@ fn main() { let (
                 "fn hello(name:usize){}",
                 "{fn hello(name:usize){}}",
                 "foo!{fn hello(name:usize){}}",
+            ],
+        );
+    }
+
+    #[test]
+    fn extend_selection_inside_str_with_wide_char() {
+        // should not panic
+        do_check(
+            r#"fn main() { let x = "═$0═══════"; }"#,
+            &[
+                r#""════════""#,
+                r#"let x = "════════";"#,
+                r#"{ let x = "════════"; }"#,
+                r#"fn main() { let x = "════════"; }"#,
             ],
         );
     }

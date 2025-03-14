@@ -11,6 +11,7 @@ set -ex
 #export RUST_TEST_THREADS=1
 
 export RUSTFLAGS="${RUSTFLAGS} -D warnings -Z merge-functions=disabled "
+export HOST_RUSTFLAGS="${RUSTFLAGS}"
 
 export STDARCH_DISABLE_DEDUP_GUARD=1
 
@@ -33,6 +34,11 @@ case ${TARGET} in
     i686-* | i586-*)
         export RUSTFLAGS="${RUSTFLAGS} -C relocation-model=static -Z plt=yes"
         ;;
+    # Some x86_64 targets enable by default more features beyond SSE2,
+    # which cause some instruction assertion checks to fail.
+    x86_64-*)
+        export RUSTFLAGS="${RUSTFLAGS} -C target-feature=-sse3"
+        ;;
     #Unoptimized build uses fast-isel which breaks with msa
     mips-* | mipsel-*)
 	export RUSTFLAGS="${RUSTFLAGS} -C llvm-args=-fast-isel=false"
@@ -47,6 +53,7 @@ case ${TARGET} in
     # Some of our test dependencies use the deprecated `gcc` crates which
     # doesn't detect RISC-V compilers automatically, so do it manually here.
     riscv64*)
+        export RUSTFLAGS="${RUSTFLAGS} -Ctarget-feature=+zk,+zks,+zbb,+zbc"
         export TARGET_CC="riscv64-linux-gnu-gcc"
         ;;
 esac
@@ -72,6 +79,14 @@ cargo_test() {
     case ${TARGET} in
         wasm32*)
             cmd="$cmd --nocapture"
+            ;;
+        # qemu has an erratic behavior on those tests
+        powerpc64*)
+            cmd="$cmd --skip test_vec_lde_u16 --skip test_vec_lde_u32 --skip test_vec_expte"
+            ;;
+        # Miscompilation: https://github.com/rust-lang/rust/issues/112460
+        arm*)
+            cmd="$cmd --skip vld2q_dup_f32"
             ;;
     esac
 
@@ -133,11 +148,19 @@ case ${TARGET} in
 esac
 
 if [ "${TARGET}" = "aarch64-unknown-linux-gnu" ]; then
-    export CPPFLAGS="-fuse-ld=lld -I/usr/aarch64-linux-gnu/include/ -I/usr/aarch64-linux-gnu/include/c++/9/aarch64-linux-gnu/"
-    RUST_LOG=warn cargo run ${INTRINSIC_TEST} --release --bin intrinsic-test -- crates/intrinsic-test/acle/tools/intrinsic_db/advsimd.csv --runner "${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER}" --cppcompiler "clang++-13" --skip crates/intrinsic-test/missing_aarch64.txt
+    (
+        CPPFLAGS="-fuse-ld=lld -I/usr/aarch64-linux-gnu/include/ -I/usr/aarch64-linux-gnu/include/c++/9/aarch64-linux-gnu/" \
+            RUSTFLAGS="$HOST_RUSTFLAGS" \
+            RUST_LOG=warn \
+            cargo run ${INTRINSIC_TEST} --release --bin intrinsic-test -- intrinsics_data/arm_intrinsics.json --runner "${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER}" --cppcompiler "clang++-15" --skip crates/intrinsic-test/missing_aarch64.txt
+    )
 elif [ "${TARGET}" = "armv7-unknown-linux-gnueabihf" ]; then
-    export CPPFLAGS="-fuse-ld=lld -I/usr/arm-linux-gnueabihf/include/ -I/usr/arm-linux-gnueabihf/include/c++/9/arm-linux-gnueabihf/"
-    RUST_LOG=warn cargo run ${INTRINSIC_TEST} --release --bin intrinsic-test -- crates/intrinsic-test/acle/tools/intrinsic_db/advsimd.csv --runner "${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUNNER}" --cppcompiler "clang++-13" --skip crates/intrinsic-test/missing_arm.txt --a32
+    (
+        CPPFLAGS="-fuse-ld=lld -I/usr/arm-linux-gnueabihf/include/ -I/usr/arm-linux-gnueabihf/include/c++/9/arm-linux-gnueabihf/" \
+            RUSTFLAGS="$HOST_RUSTFLAGS" \
+            RUST_LOG=warn \
+            cargo run ${INTRINSIC_TEST} --release --bin intrinsic-test -- intrinsics_data/arm_intrinsics.json --runner "${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUNNER}" --cppcompiler "clang++-15" --skip crates/intrinsic-test/missing_arm.txt --a32
+    )
 fi
 
 if [ "$NORUN" != "1" ] && [ "$NOSTD" != 1 ]; then
@@ -145,6 +168,6 @@ if [ "$NORUN" != "1" ] && [ "$NOSTD" != 1 ]; then
     (
         cd examples
         cargo test --target "$TARGET"
-        echo test | cargo run --release hex
+        echo test | cargo run --target "$TARGET" --release hex
     )
 fi

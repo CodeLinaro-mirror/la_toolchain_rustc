@@ -3,11 +3,10 @@ use anyhow::bail;
 use cargo::{drop_println, CargoResult};
 use serde::Serialize;
 
-pub fn cli() -> App {
+pub fn cli() -> Command {
     subcommand("locate-project")
         .about("Print a JSON representation of a Cargo.toml file's location")
-        .arg_quiet()
-        .arg_manifest_path()
+        .arg(flag("workspace", "Locate Cargo.toml of the workspace root"))
         .arg(
             opt(
                 "message-format",
@@ -15,8 +14,11 @@ pub fn cli() -> App {
             )
             .value_name("FMT"),
         )
-        .arg(opt("workspace", "Locate Cargo.toml of the workspace root"))
-        .after_help("Run `cargo help locate-project` for more detailed information.\n")
+        .arg_silent_suggestion()
+        .arg_manifest_path()
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help locate-project</>` for more detailed information.\n"
+        ))
 }
 
 #[derive(Serialize)]
@@ -24,16 +26,16 @@ pub struct ProjectLocation<'a> {
     root: &'a str,
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     let root_manifest;
     let workspace;
     let root = match WhatToFind::parse(args) {
         WhatToFind::CurrentManifest => {
-            root_manifest = args.root_manifest(config)?;
+            root_manifest = args.root_manifest(gctx)?;
             &root_manifest
         }
         WhatToFind::Workspace => {
-            workspace = args.workspace(config)?;
+            workspace = args.workspace(gctx)?;
             workspace.root_manifest()
         }
     };
@@ -51,8 +53,8 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
     let location = ProjectLocation { root };
 
     match MessageFormat::parse(args)? {
-        MessageFormat::Json => config.shell().print_json(&location)?,
-        MessageFormat::Plain => drop_println!(config, "{}", location.root),
+        MessageFormat::Json => gctx.shell().print_json(&location)?,
+        MessageFormat::Plain => drop_println!(gctx, "{}", location.root),
     }
 
     Ok(())
@@ -65,7 +67,7 @@ enum WhatToFind {
 
 impl WhatToFind {
     fn parse(args: &ArgMatches) -> Self {
-        if args.is_present("workspace") {
+        if args.flag("workspace") {
             WhatToFind::Workspace
         } else {
             WhatToFind::CurrentManifest
@@ -80,7 +82,7 @@ enum MessageFormat {
 
 impl MessageFormat {
     fn parse(args: &ArgMatches) -> CargoResult<Self> {
-        let fmt = match args.value_of("message-format") {
+        let fmt = match args.get_one::<String>("message-format") {
             Some(fmt) => fmt,
             None => return Ok(MessageFormat::Json),
         };

@@ -29,13 +29,14 @@
 #ifndef LLVM_ANALYSIS_LOOPANALYSISMANAGER_H
 #define LLVM_ANALYSIS_LOOPANALYSISMANAGER_H
 
-#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/IR/PassManager.h"
 
 namespace llvm {
 
 class AAResults;
 class AssumptionCache;
+class BlockFrequencyInfo;
+class BranchProbabilityInfo;
 class DominatorTree;
 class Function;
 class Loop;

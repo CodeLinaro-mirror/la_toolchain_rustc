@@ -58,7 +58,7 @@ FunctionPass *llvm::createSystemZLDCleanupPass(SystemZTargetMachine &TM) {
 
 void SystemZLDCleanup::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesCFG();
-  AU.addRequired<MachineDominatorTree>();
+  AU.addRequired<MachineDominatorTreeWrapperPass>();
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
@@ -66,7 +66,7 @@ bool SystemZLDCleanup::runOnMachineFunction(MachineFunction &F) {
   if (skipFunction(F.getFunction()))
     return false;
 
-  TII = static_cast<const SystemZInstrInfo *>(F.getSubtarget().getInstrInfo());
+  TII = F.getSubtarget<SystemZSubtarget>().getInstrInfo();
   MF = &F;
 
   SystemZMachineFunctionInfo* MFI = F.getInfo<SystemZMachineFunctionInfo>();
@@ -75,7 +75,8 @@ bool SystemZLDCleanup::runOnMachineFunction(MachineFunction &F) {
     return false;
   }
 
-  MachineDominatorTree *DT = &getAnalysis<MachineDominatorTree>();
+  MachineDominatorTree *DT =
+      &getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
   return VisitNode(DT->getRootNode(), 0);
 }
 
@@ -105,8 +106,8 @@ bool SystemZLDCleanup::VisitNode(MachineDomTreeNode *Node,
   }
 
   // Visit the children of this block in the dominator tree.
-  for (auto I = Node->begin(), E = Node->end(); I != E; ++I)
-    Changed |= VisitNode(*I, TLSBaseAddrReg);
+  for (auto &N : *Node)
+    Changed |= VisitNode(N, TLSBaseAddrReg);
 
   return Changed;
 }

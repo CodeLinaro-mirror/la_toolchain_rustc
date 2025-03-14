@@ -1,20 +1,20 @@
 // RUN: not %clang_cc1 -target-feature +altivec -target-feature +vsx \
-// RUN:   -faltivec-src-compat=mixed -triple powerpc-unknown-unknown -S \
+// RUN:   -faltivec-src-compat=mixed -triple powerpc-unknown-unknown \
 // RUN:   -emit-llvm %s -o - 2>&1 | FileCheck %s --check-prefix=MIXED-ERR
 // RUN: not %clang_cc1 -target-feature +altivec -target-feature +vsx \
-// RUN:   -faltivec-src-compat=mixed -triple powerpc64le-unknown-unknown -S \
+// RUN:   -faltivec-src-compat=mixed -triple powerpc64le-unknown-unknown \
 // RUN:   -emit-llvm %s -o - 2>&1 | FileCheck %s --check-prefix=MIXED-ERR
 // RUN: not %clang_cc1 -target-feature +altivec -target-feature +vsx \
-// RUN:   -faltivec-src-compat=gcc -triple powerpc-unknown-unknown -S \
+// RUN:   -faltivec-src-compat=gcc -triple powerpc-unknown-unknown \
 // RUN:   -emit-llvm %s -o - 2>&1 | FileCheck %s --check-prefix=GCC-ERR
 // RUN: not %clang_cc1 -target-feature +altivec -target-feature +vsx \
-// RUN:   -faltivec-src-compat=gcc -triple powerpc64le-unknown-unknown -S \
+// RUN:   -faltivec-src-compat=gcc -triple powerpc64le-unknown-unknown \
 // RUN:   -emit-llvm %s -o - 2>&1 | FileCheck %s --check-prefix=GCC-ERR
 // RUN: %clang_cc1 -target-feature +altivec -target-feature +vsx \
-// RUN:   -faltivec-src-compat=xl -triple powerpc-unknown-unknown -S \
+// RUN:   -faltivec-src-compat=xl -triple powerpc-unknown-unknown \
 // RUN:   -emit-llvm %s -o - | FileCheck %s --check-prefix=XL
 // RUN: %clang_cc1 -target-feature +altivec -target-feature +vsx \
-// RUN:   -faltivec-src-compat=xl -triple powerpc64le-unknown-unknown -S \
+// RUN:   -faltivec-src-compat=xl -triple powerpc64le-unknown-unknown \
 // RUN:   -emit-llvm %s -o - | FileCheck %s --check-prefix=XL
 // RUN: not %clang -mcpu=pwr8 -faltivec-src-compat=mixed --target=powerpc-unknown-unknown \
 // RUN:   -S -emit-llvm %s -o - 2>&1 | FileCheck %s --check-prefix=MIXED-ERR
@@ -46,7 +46,7 @@ vector bool long long vbi64_2;
 vector pixel p1;
 
 ////////////////////////////////////////////////////////////////////////////////
-void test_vector_bool_pixel_init_no_parentheses() {
+void test_vector_bool_pixel_init_no_parentheses(void) {
   // vector bool char initialization
   vbi8_1 = (vector bool char)'a';
   // MIXED-ERR: error: invalid conversion between vector type '__vector __bool unsigned char'

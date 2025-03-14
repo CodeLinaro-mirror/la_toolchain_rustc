@@ -22,7 +22,7 @@ extern "C" {
 /// [fxsave]: http://www.felixcloutier.com/x86/FXSAVE.html
 /// [fxrstor]: http://www.felixcloutier.com/x86/FXRSTOR.html
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_fxsave)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_fxsave)
 #[inline]
 #[target_feature(enable = "fxsr")]
 #[cfg_attr(test, assert_instr(fxsave))]
@@ -46,7 +46,7 @@ pub unsafe fn _fxsave(mem_addr: *mut u8) {
 /// [fxsave]: http://www.felixcloutier.com/x86/FXSAVE.html
 /// [fxrstor]: http://www.felixcloutier.com/x86/FXRSTOR.html
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_fxrstor)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_fxrstor)
 #[inline]
 #[target_feature(enable = "fxsr")]
 #[cfg_attr(test, assert_instr(fxrstor))]
@@ -71,7 +71,7 @@ mod tests {
             FxsaveArea { data: [0; 512] }
         }
         fn ptr(&mut self) -> *mut u8 {
-            &mut self.data[0] as *mut _ as *mut u8
+            self.data.as_mut_ptr()
         }
     }
 
@@ -100,7 +100,8 @@ mod tests {
     }
 
     #[simd_test(enable = "fxsr")]
-    unsafe fn fxsave() {
+    #[cfg_attr(miri, ignore)] // Register saving/restoring is not supported in Miri
+    unsafe fn test_fxsave() {
         let mut a = FxsaveArea::new();
         let mut b = FxsaveArea::new();
 

@@ -1,14 +1,16 @@
-use byteorder::{BigEndian, ByteOrder};
 use std::env;
 #[cfg(unix)]
 use std::io::{self, BufRead};
+use std::path::PathBuf;
+
+use byteorder::{BigEndian, ByteOrder};
 
 fn main() {
     // Check env var set by `build.rs`.
     assert_eq!(env!("MIRITESTVAR"), "testval");
 
     // Exercise external crate, printing to stdout.
-    let buf = &[1,2,3,4];
+    let buf = &[1, 2, 3, 4];
     let n = <BigEndian as ByteOrder>::read_u32(buf);
     assert_eq!(n, 0x01020304);
     println!("{:#010x}", n);
@@ -21,18 +23,36 @@ fn main() {
     // If there were no arguments, access stdin and test working dir.
     // (We rely on the test runner to always disable isolation when passing no arguments.)
     if std::env::args().len() <= 1 {
+        fn host_to_target_path(path: String) -> PathBuf {
+            use std::ffi::{CStr, CString, c_char};
+
+            let path = CString::new(path).unwrap();
+            let mut out = Vec::with_capacity(1024);
+
+            unsafe {
+                extern "Rust" {
+                    fn miri_host_to_target_path(
+                        path: *const c_char,
+                        out: *mut c_char,
+                        out_size: usize,
+                    ) -> usize;
+                }
+                let ret = miri_host_to_target_path(path.as_ptr(), out.as_mut_ptr(), out.capacity());
+                assert_eq!(ret, 0);
+                let out = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
+                PathBuf::from(out)
+            }
+        }
+
         // CWD should be crate root.
-        // We have to normalize slashes, as the env var might be set for a different target's conventions.
         let env_dir = env::current_dir().unwrap();
-        let env_dir = env_dir.to_string_lossy().replace("\\", "/");
-        let crate_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap();
-        let crate_dir = crate_dir.to_string_lossy().replace("\\", "/");
+        let crate_dir = host_to_target_path(env::var("CARGO_MANIFEST_DIR").unwrap());
         assert_eq!(env_dir, crate_dir);
 
         #[cfg(unix)]
         for line in io::stdin().lock().lines() {
             let num: i32 = line.unwrap().parse().unwrap();
-            println!("{}", 2*num);
+            println!("{}", 2 * num);
         }
         // On non-Unix, reading from stdin is not supported. So we hard-code the right answer.
         #[cfg(not(unix))]
@@ -45,17 +65,12 @@ fn main() {
 
 #[cfg(test)]
 mod test {
-    use rand::{Rng, SeedableRng};
+    use byteorder_2::{BigEndian, ByteOrder};
 
     // Make sure in-crate tests with dev-dependencies work
     #[test]
-    fn rng() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0xcafebeef);
-        let x: u32 = rng.gen();
-        let y: usize = rng.gen();
-        let z: u128 = rng.gen();
-        assert_ne!(x as usize, y);
-        assert_ne!(y as u128, z);
+    fn dev_dependency() {
+        let _n = <BigEndian as ByteOrder>::read_u64(&[1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]

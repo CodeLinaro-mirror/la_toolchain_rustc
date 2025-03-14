@@ -33,7 +33,7 @@ extern "C" {
 /// The format of the XSAVE area is detailed in Section 13.4, “XSAVE Area,” of
 /// Intel® 64 and IA-32 Architectures Software Developer’s Manual, Volume 1.
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_xsave)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_xsave)
 #[inline]
 #[target_feature(enable = "xsave")]
 #[cfg_attr(test, assert_instr(xsave))]
@@ -49,7 +49,7 @@ pub unsafe fn _xsave(mem_addr: *mut u8, save_mask: u64) {
 /// `mem_addr.HEADER.XSTATE_BV`. `mem_addr` must be aligned on a 64-byte
 /// boundary.
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_xrstor)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_xrstor)
 #[inline]
 #[target_feature(enable = "xsave")]
 #[cfg_attr(test, assert_instr(xrstor))]
@@ -69,7 +69,7 @@ pub const _XCR_XFEATURE_ENABLED_MASK: u32 = 0;
 ///
 /// Currently only `XFEATURE_ENABLED_MASK` `XCR` is supported.
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_xsetbv)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_xsetbv)
 #[inline]
 #[target_feature(enable = "xsave")]
 #[cfg_attr(test, assert_instr(xsetbv))]
@@ -81,7 +81,7 @@ pub unsafe fn _xsetbv(a: u32, val: u64) {
 /// Reads the contents of the extended control register `XCR`
 /// specified in `xcr_no`.
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_xgetbv)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_xgetbv)
 #[inline]
 #[target_feature(enable = "xsave")]
 #[cfg_attr(test, assert_instr(xgetbv))]
@@ -98,7 +98,7 @@ pub unsafe fn _xgetbv(xcr_no: u32) -> u64 {
 /// the manner in which data is saved. The performance of this instruction will
 /// be equal to or better than using the `XSAVE` instruction.
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_xsaveopt)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_xsaveopt)
 #[inline]
 #[target_feature(enable = "xsave,xsaveopt")]
 #[cfg_attr(test, assert_instr(xsaveopt))]
@@ -114,7 +114,7 @@ pub unsafe fn _xsaveopt(mem_addr: *mut u8, save_mask: u64) {
 /// use init optimization. State is saved based on bits `[62:0]` in `save_mask`
 /// and `XCR0`. `mem_addr` must be aligned on a 64-byte boundary.
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_xsavec)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_xsavec)
 #[inline]
 #[target_feature(enable = "xsave,xsavec")]
 #[cfg_attr(test, assert_instr(xsavec))]
@@ -131,7 +131,7 @@ pub unsafe fn _xsavec(mem_addr: *mut u8, save_mask: u64) {
 /// modified optimization. State is saved based on bits `[62:0]` in `save_mask`
 /// and `XCR0`. `mem_addr` must be aligned on a 64-byte boundary.
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_xsaves)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_xsaves)
 #[inline]
 #[target_feature(enable = "xsave,xsaves")]
 #[cfg_attr(test, assert_instr(xsaves))]
@@ -150,7 +150,7 @@ pub unsafe fn _xsaves(mem_addr: *mut u8, save_mask: u64) {
 /// `mem_addr.HEADER.XSTATE_BV`. `mem_addr` must be aligned on a 64-byte
 /// boundary.
 ///
-/// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_xrstors)
+/// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_xrstors)
 #[inline]
 #[target_feature(enable = "xsave,xsaves")]
 #[cfg_attr(test, assert_instr(xrstors))]
@@ -180,7 +180,7 @@ mod tests {
             XsaveArea { data: [0; 2560] }
         }
         fn ptr(&mut self) -> *mut u8 {
-            &mut self.data[0] as *mut _ as *mut u8
+            self.data.as_mut_ptr()
         }
     }
 
@@ -208,10 +208,14 @@ mod tests {
         }
     }
 
-    // FIXME: https://github.com/rust-lang/stdarch/issues/209
-    /*
+    // We cannot test for `_xsave`, `xrstor`, `_xsetbv`, `_xsaveopt`, `_xsaves`, `_xrstors` as they
+    // are privileged instructions and will need access to kernel mode to execute and test them.
+    // see https://github.com/rust-lang/stdarch/issues/209
+
+    #[cfg_attr(stdarch_intel_sde, ignore)]
     #[simd_test(enable = "xsave")]
-    unsafe fn xsave() {
+    #[cfg_attr(miri, ignore)] // Register saving/restoring is not supported in Miri
+    unsafe fn test_xsave() {
         let m = 0xFFFFFFFFFFFFFFFF_u64; //< all registers
         let mut a = XsaveArea::new();
         let mut b = XsaveArea::new();
@@ -221,25 +225,21 @@ mod tests {
         _xsave(b.ptr(), m);
         assert_eq!(a, b);
     }
-    */
 
     #[simd_test(enable = "xsave")]
-    unsafe fn xgetbv_xsetbv() {
+    #[cfg_attr(miri, ignore)] // Register saving/restoring is not supported in Miri
+    unsafe fn test_xgetbv() {
         let xcr_n: u32 = _XCR_XFEATURE_ENABLED_MASK;
 
         let xcr: u64 = _xgetbv(xcr_n);
-        // FIXME: XSETBV is a privileged instruction we should only test this
-        // when running in privileged mode:
-        //
-        // _xsetbv(xcr_n, xcr);
         let xcr_cpy: u64 = _xgetbv(xcr_n);
         assert_eq!(xcr, xcr_cpy);
     }
 
-    // FIXME: https://github.com/rust-lang/stdarch/issues/209
-    /*
+    #[cfg_attr(stdarch_intel_sde, ignore)]
     #[simd_test(enable = "xsave,xsaveopt")]
-    unsafe fn xsaveopt() {
+    #[cfg_attr(miri, ignore)] // Register saving/restoring is not supported in Miri
+    unsafe fn test_xsaveopt() {
         let m = 0xFFFFFFFFFFFFFFFF_u64; //< all registers
         let mut a = XsaveArea::new();
         let mut b = XsaveArea::new();
@@ -249,12 +249,10 @@ mod tests {
         _xsaveopt(b.ptr(), m);
         assert_eq!(a, b);
     }
-    */
 
-    // FIXME: this looks like a bug in Intel's SDE:
-    #[cfg(not(stdarch_intel_sde))]
     #[simd_test(enable = "xsave,xsavec")]
-    unsafe fn xsavec() {
+    #[cfg_attr(miri, ignore)] // Register saving/restoring is not supported in Miri
+    unsafe fn test_xsavec() {
         let m = 0xFFFFFFFFFFFFFFFF_u64; //< all registers
         let mut a = XsaveArea::new();
         let mut b = XsaveArea::new();
@@ -264,19 +262,4 @@ mod tests {
         _xsavec(b.ptr(), m);
         assert_eq!(a, b);
     }
-
-    // FIXME: https://github.com/rust-lang/stdarch/issues/209
-    /*
-    #[simd_test(enable = "xsave,xsaves")]
-    unsafe fn xsaves() {
-        let m = 0xFFFFFFFFFFFFFFFF_u64; //< all registers
-        let mut a = XsaveArea::new();
-        let mut b = XsaveArea::new();
-
-        _xsaves(a.ptr(), m);
-        _xrstors(a.ptr(), m);
-        _xsaves(b.ptr(), m);
-        assert_eq!(a, b);
-    }
-    */
 }

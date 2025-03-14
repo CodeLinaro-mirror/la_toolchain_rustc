@@ -3,12 +3,12 @@
 In this section we check that some of the required tools / drivers have been
 correctly installed and configured.
 
-Connect your laptop / PC to the discovery board using a micro USB cable. The
+Connect your laptop / PC to the discovery board using a Mini-USB USB cable. The
 discovery board has two USB connectors; use the one labeled "USB ST-LINK" that
 sits on the center of the edge of the board.
 
 Also check that the ST-LINK header is populated. See the picture below; the
-ST-LINK header is circled in red.
+ST-LINK header is highlighted.
 
 <p align="center">
 <img title="Connected discovery board" src="../../assets/verify.jpeg">

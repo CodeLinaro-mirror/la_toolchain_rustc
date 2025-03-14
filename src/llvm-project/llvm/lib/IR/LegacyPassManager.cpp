@@ -29,12 +29,9 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 
-#ifdef EXPENSIVE_CHECKS
-#include "llvm/IR/StructuralHash.h"
-#endif
-
 using namespace llvm;
 
+extern cl::opt<bool> UseNewDbgInfoFormat;
 // See PassManagers.h for Pass Manager infrastructure overview.
 
 //===----------------------------------------------------------------------===//
@@ -531,6 +528,11 @@ bool PassManagerImpl::run(Module &M) {
   dumpArguments();
   dumpPasses();
 
+  // RemoveDIs: if a command line flag is given, convert to the
+  // DbgVariableRecord representation of debug-info for the duration of these
+  // passes.
+  ScopedDbgInfoFormatSetter FormatSetter(M, UseNewDbgInfoFormat);
+
   for (ImmutablePass *ImPass : getImmutablePasses())
     Changed |= ImPass->doInitialization(M);
 
@@ -821,9 +823,8 @@ void PMTopLevelManager::dumpPasses() const {
     return;
 
   // Print out the immutable passes
-  for (unsigned i = 0, e = ImmutablePasses.size(); i != e; ++i) {
-    ImmutablePasses[i]->dumpPassStructure(0);
-  }
+  for (ImmutablePass *Pass : ImmutablePasses)
+    Pass->dumpPassStructure(0);
 
   // Every class that derives from PMDataManager also derives from Pass
   // (sometimes indirectly), but there's no inheritance relationship
@@ -1412,15 +1413,20 @@ bool FPPassManager::runOnFunction(Function &F) {
     FunctionSize = F.getInstructionCount();
   }
 
-  llvm::TimeTraceScope FunctionScope("OptFunction", F.getName());
+  // Store name outside of loop to avoid redundant calls.
+  const StringRef Name = F.getName();
+  llvm::TimeTraceScope FunctionScope("OptFunction", Name);
 
   for (unsigned Index = 0; Index < getNumContainedPasses(); ++Index) {
     FunctionPass *FP = getContainedPass(Index);
     bool LocalChanged = false;
 
-    llvm::TimeTraceScope PassScope("RunPass", FP->getPassName());
+    // Call getPassName only when required. The call itself is fairly cheap, but
+    // still virtual and repeated calling adds unnecessary overhead.
+    llvm::TimeTraceScope PassScope(
+        "RunPass", [FP]() { return std::string(FP->getPassName()); });
 
-    dumpPassInfo(FP, EXECUTION_MSG, ON_FUNCTION_MSG, F.getName());
+    dumpPassInfo(FP, EXECUTION_MSG, ON_FUNCTION_MSG, Name);
     dumpRequiredSet(FP);
 
     initializeAnalysisImpl(FP);
@@ -1429,12 +1435,12 @@ bool FPPassManager::runOnFunction(Function &F) {
       PassManagerPrettyStackEntry X(FP, F);
       TimeRegion PassTimer(getPassTimer(FP));
 #ifdef EXPENSIVE_CHECKS
-      uint64_t RefHash = StructuralHash(F);
+      uint64_t RefHash = FP->structuralHash(F);
 #endif
       LocalChanged |= FP->runOnFunction(F);
 
 #if defined(EXPENSIVE_CHECKS) && !defined(NDEBUG)
-      if (!LocalChanged && (RefHash != StructuralHash(F))) {
+      if (!LocalChanged && (RefHash != FP->structuralHash(F))) {
         llvm::errs() << "Pass modifies its input and doesn't report it: "
                      << FP->getPassName() << "\n";
         llvm_unreachable("Pass modifies its input and doesn't report it");
@@ -1459,7 +1465,7 @@ bool FPPassManager::runOnFunction(Function &F) {
 
     Changed |= LocalChanged;
     if (LocalChanged)
-      dumpPassInfo(FP, MODIFICATION_MSG, ON_FUNCTION_MSG, F.getName());
+      dumpPassInfo(FP, MODIFICATION_MSG, ON_FUNCTION_MSG, Name);
     dumpPreservedSet(FP);
     dumpUsedSet(FP);
 
@@ -1467,7 +1473,7 @@ bool FPPassManager::runOnFunction(Function &F) {
     if (LocalChanged)
       removeNotPreservedAnalysis(FP);
     recordAvailableAnalysis(FP);
-    removeDeadPasses(FP, F.getName(), ON_FUNCTION_MSG);
+    removeDeadPasses(FP, Name, ON_FUNCTION_MSG);
   }
 
   return Changed;
@@ -1543,13 +1549,13 @@ MPPassManager::runOnModule(Module &M) {
       TimeRegion PassTimer(getPassTimer(MP));
 
 #ifdef EXPENSIVE_CHECKS
-      uint64_t RefHash = StructuralHash(M);
+      uint64_t RefHash = MP->structuralHash(M);
 #endif
 
       LocalChanged |= MP->runOnModule(M);
 
 #ifdef EXPENSIVE_CHECKS
-      assert((LocalChanged || (RefHash == StructuralHash(M))) &&
+      assert((LocalChanged || (RefHash == MP->structuralHash(M))) &&
              "Pass modifies its input and doesn't report it.");
 #endif
 
@@ -1767,4 +1773,4 @@ void FunctionPass::assignPassManager(PMStack &PMS,
   PM->add(this);
 }
 
-legacy::PassManagerBase::~PassManagerBase() {}
+legacy::PassManagerBase::~PassManagerBase() = default;

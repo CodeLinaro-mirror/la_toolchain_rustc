@@ -1,9 +1,11 @@
 # cargo-build(1)
-{{*set actionverb="Build"}}
+{{~*set command="build"}}
+{{~*set actionverb="Build"}}
+{{~*set multitarget=true}}
 
 ## NAME
 
-cargo-build - Compile the current package
+cargo-build --- Compile the current package
 
 ## SYNOPSIS
 
@@ -23,6 +25,8 @@ When no target selection options are given, `cargo build` will build all
 binary and library targets of the selected packages. Binaries are skipped if
 they have `required-features` that are missing.
 
+{{> options-targets-bin-auto-built }}
+
 {{> options-targets }}
 
 {{> section-features }}
@@ -37,8 +41,6 @@ they have `required-features` that are missing.
 
 {{> options-profile }}
 
-{{> options-ignore-rust-version }}
-
 {{> options-timings }}
 
 {{/options}}
@@ -48,7 +50,7 @@ they have `required-features` that are missing.
 {{#options}}
 {{> options-target-dir }}
 
-{{#option "`--out-dir` _directory_" }}
+{{#option "`--artifact-dir` _directory_" }}
 Copy final artifacts to this directory.
 
 This option is unstable and available only on the
@@ -82,7 +84,11 @@ See <https://github.com/rust-lang/cargo/issues/5579> for more information.
 {{#options}}
 {{> options-manifest-path }}
 
+{{> options-ignore-rust-version }}
+
 {{> options-locked }}
+
+{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-options-common }}
@@ -91,6 +97,7 @@ See <https://github.com/rust-lang/cargo/issues/5579> for more information.
 
 {{#options}}
 {{> options-jobs }}
+{{> options-keep-going }}
 {{> options-future-incompat }}
 {{/options}}
 

@@ -1,11 +1,13 @@
 //! limit defines a struct to enforce limits.
 
+#[cfg(feature = "tracking")]
 use std::sync::atomic::AtomicUsize;
 
 /// Represents a struct used to enforce a numerical limit.
+#[derive(Debug)]
 pub struct Limit {
     upper_bound: usize,
-    #[allow(unused)]
+    #[cfg(feature = "tracking")]
     max: AtomicUsize,
 }
 
@@ -13,14 +15,22 @@ impl Limit {
     /// Creates a new limit.
     #[inline]
     pub const fn new(upper_bound: usize) -> Self {
-        Self { upper_bound, max: AtomicUsize::new(0) }
+        Self {
+            upper_bound,
+            #[cfg(feature = "tracking")]
+            max: AtomicUsize::new(0),
+        }
     }
 
     /// Creates a new limit.
     #[inline]
     #[cfg(feature = "tracking")]
     pub const fn new_tracking(upper_bound: usize) -> Self {
-        Self { upper_bound, max: AtomicUsize::new(1) }
+        Self {
+            upper_bound,
+            #[cfg(feature = "tracking")]
+            max: AtomicUsize::new(1),
+        }
     }
 
     /// Gets the underlying numeric limit.
@@ -43,13 +53,12 @@ impl Limit {
                 if other <= old_max || old_max == 0 {
                     break;
                 }
-                if self
-                    .max
-                    .compare_exchange_weak(old_max, other, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    eprintln!("new max: {}", other);
-                }
+                _ = self.max.compare_exchange_weak(
+                    old_max,
+                    other,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
             }
 
             Ok(())

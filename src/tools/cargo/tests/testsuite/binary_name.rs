@@ -1,7 +1,11 @@
-use cargo_test_support::install::{
-    assert_has_installed_exe, assert_has_not_installed_exe, cargo_home,
-};
+//! Tests for `cargo-features = ["different-binary-name"]`.
+
+use cargo_test_support::install::assert_has_installed_exe;
+use cargo_test_support::install::assert_has_not_installed_exe;
+use cargo_test_support::paths;
+use cargo_test_support::prelude::*;
 use cargo_test_support::project;
+use cargo_test_support::str;
 
 #[cargo_test]
 fn gated() {
@@ -9,9 +13,10 @@ fn gated() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name =  "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [[bin]]
                 name = "foo"
@@ -24,9 +29,19 @@ fn gated() {
 
     // Run cargo build.
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
         .with_status(101)
-        .with_stderr_contains("[..]feature `different-binary-name` is required")
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `different-binary-name` is required
+
+  The package requires the Cargo feature called `different-binary-name`, but that feature is not stabilized in this version of Cargo ([..]).
+  Consider adding `cargo-features = ["different-binary-name"]` to the top of Cargo.toml (above the [package] table) to tell Cargo you are opting in to use this unstable feature.
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#different-binary-name for more information about the status of this feature.
+
+"#]])
         .run();
 }
 
@@ -44,9 +59,10 @@ fn binary_name1() {
             r#"
                 cargo-features = ["different-binary-name"]
 
-                [project]
+                [package]
                 name =  "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [[bin]]
                 name = "foo"
@@ -58,7 +74,9 @@ fn binary_name1() {
         .build();
 
     // Run cargo build.
-    p.cargo("build").masquerade_as_nightly_cargo().run();
+    p.cargo("build")
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .run();
 
     // Check the name of the binary that cargo has generated.
     // A binary with the name of the crate should NOT be created.
@@ -90,17 +108,18 @@ fn binary_name1() {
 
     // Run cargo second time, to verify fingerprint.
     p.cargo("build -p foo -v")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[FRESH] foo [..]
-[FINISHED] [..]
-",
-        )
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     // Run cargo clean.
-    p.cargo("clean -p foo").masquerade_as_nightly_cargo().run();
+    p.cargo("clean -p foo")
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .run();
 
     // Check if the appropriate file was removed.
     assert!(
@@ -122,9 +141,10 @@ fn binary_name2() {
             r#"
                 cargo-features = ["different-binary-name"]
 
-                [project]
+                [package]
                 name =  "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [[bin]]
                 name = "foo"
@@ -156,7 +176,9 @@ fn binary_name2() {
         .build();
 
     // Run cargo build.
-    p.cargo("build").masquerade_as_nightly_cargo().run();
+    p.cargo("build")
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .run();
 
     // Check the name of the binary that cargo has generated.
     // A binary with the name of the crate should NOT be created.
@@ -168,32 +190,48 @@ fn binary_name2() {
 
     // Check if `cargo test` works
     p.cargo("test")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] test [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] [..] (target/debug/deps/foo-[..][EXE])",
-        )
-        .with_stdout_contains("test tests::check_crabs ... ok")
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] unittests src/main.rs (target/debug/deps/foo-[..][EXE])
+
+"#]])
+        .with_stdout_data(str![[r#"
+
+running 1 test
+test tests::check_crabs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
+
+
+"#]])
         .run();
 
     // Check if `cargo run` is able to execute the binary
     p.cargo("run")
-        .masquerade_as_nightly_cargo()
-        .with_stdout("Hello, crabs!")
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .with_stdout_data(str![[r#"
+Hello, crabs!
+
+"#]])
         .run();
 
-    p.cargo("install").masquerade_as_nightly_cargo().run();
+    p.cargo("install")
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .run();
 
-    assert_has_installed_exe(cargo_home(), "007bar");
+    assert_has_installed_exe(paths::cargo_home(), "007bar");
 
     p.cargo("uninstall")
-        .with_stderr("[REMOVING] [ROOT]/home/.cargo/bin/007bar[EXE]")
-        .masquerade_as_nightly_cargo()
+        .with_stderr_data(str![[r#"
+[REMOVING] [ROOT]/home/.cargo/bin/007bar[EXE]
+
+"#]])
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
         .run();
 
-    assert_has_not_installed_exe(cargo_home(), "007bar");
+    assert_has_not_installed_exe(paths::cargo_home(), "007bar");
 }
 
 #[cargo_test]
@@ -204,9 +242,10 @@ fn check_env_vars() {
             r#"
                 cargo-features = ["different-binary-name"]
 
-                [project]
+                [package]
                 name =  "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [[bin]]
                 name = "foo"
@@ -234,13 +273,18 @@ fn check_env_vars() {
         .build();
 
     // Run cargo build.
-    p.cargo("build").masquerade_as_nightly_cargo().run();
+    p.cargo("build")
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .run();
     p.cargo("run")
-        .masquerade_as_nightly_cargo()
-        .with_stdout("007bar")
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .with_stdout_data(str![[r#"
+007bar
+
+"#]])
         .run();
     p.cargo("test")
-        .masquerade_as_nightly_cargo()
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
         .with_status(0)
         .run();
 }
@@ -254,9 +298,10 @@ fn check_msg_format_json() {
             r#"
                 cargo-features = ["different-binary-name"]
 
-                [project]
+                [package]
                 name =  "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [[bin]]
                 name = "foo"
@@ -267,25 +312,31 @@ fn check_msg_format_json() {
         .file("src/main.rs", "fn main() { assert!(true) }")
         .build();
 
-    let output = r#"
-{
-    "reason": "compiler-artifact",
-    "package_id": "foo 0.0.1 [..]",
-    "manifest_path": "[CWD]/Cargo.toml",
-    "target": "{...}",
-    "profile": "{...}",
-    "features": [],
-    "filenames": "{...}",
-    "executable": "[ROOT]/foo/target/debug/007bar[EXE]",
-    "fresh": false
-}
-
-{"reason":"build-finished", "success":true}
-"#;
-
     // Run cargo build.
     p.cargo("build --message-format=json")
-        .masquerade_as_nightly_cargo()
-        .with_json(output)
+        .masquerade_as_nightly_cargo(&["different-binary-name"])
+        .with_stdout_data(
+            str![[r#"
+[
+  {
+    "executable": "[ROOT]/foo/target/debug/007bar[EXE]",
+    "features": [],
+    "filenames": "{...}",
+    "fresh": false,
+    "manifest_path": "[ROOT]/foo/Cargo.toml",
+    "package_id": "path+[ROOTURL]/foo#0.0.1",
+    "profile": "{...}",
+    "reason": "compiler-artifact",
+    "target": "{...}"
+  },
+  {
+    "reason": "build-finished",
+    "success": true
+  }
+]
+"#]]
+            .is_json()
+            .against_jsonlines(),
+        )
         .run();
 }

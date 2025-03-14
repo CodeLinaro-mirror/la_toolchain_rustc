@@ -6,11 +6,12 @@ use std::sync::Mutex;
 
 use anyhow::Context as _;
 use cargo_util::{paths, ProcessBuilder, ProcessError};
-use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
+use crate::core::compiler::apply_env_config;
 use crate::util::interning::InternedString;
-use crate::util::{profile, CargoResult, StableHasher};
+use crate::util::{CargoResult, GlobalContext, StableHasher};
 
 /// Information on the `rustc` executable
 #[derive(Debug)]
@@ -28,6 +29,8 @@ pub struct Rustc {
     pub version: semver::Version,
     /// The host triple (arch-platform-OS), this comes from verbose_version.
     pub host: InternedString,
+    /// The rustc full commit hash, this comes from `verbose_version`.
+    pub commit_hash: Option<String>,
     cache: Mutex<Cache>,
 }
 
@@ -37,32 +40,35 @@ impl Rustc {
     ///
     /// If successful this function returns a description of the compiler along
     /// with a list of its capabilities.
+    #[tracing::instrument(skip(gctx))]
     pub fn new(
         path: PathBuf,
         wrapper: Option<PathBuf>,
         workspace_wrapper: Option<PathBuf>,
         rustup_rustc: &Path,
         cache_location: Option<PathBuf>,
+        gctx: &GlobalContext,
     ) -> CargoResult<Rustc> {
-        let _p = profile::start("Rustc::new");
-
         let mut cache = Cache::load(
             wrapper.as_deref(),
             workspace_wrapper.as_deref(),
             &path,
             rustup_rustc,
             cache_location,
+            gctx,
         );
 
-        let mut cmd = ProcessBuilder::new(&path);
+        let mut cmd = ProcessBuilder::new(&path)
+            .wrapped(workspace_wrapper.as_ref())
+            .wrapped(wrapper.as_deref());
+        apply_env_config(gctx, &mut cmd)?;
         cmd.arg("-vV");
         let verbose_version = cache.cached_output(&cmd, 0)?.0;
 
         let extract = |field: &str| -> CargoResult<&str> {
             verbose_version
                 .lines()
-                .find(|l| l.starts_with(field))
-                .map(|l| &l[field.len()..])
+                .find_map(|l| l.strip_prefix(field))
                 .ok_or_else(|| {
                     anyhow::format_err!(
                         "`rustc -vV` didn't have a line for `{}`, got:\n{}",
@@ -79,6 +85,23 @@ impl Rustc {
                 verbose_version
             )
         })?;
+        let commit_hash = extract("commit-hash: ").ok().map(|hash| {
+            // Possible commit-hash values from rustc are SHA hex string and "unknown". See:
+            // * https://github.com/rust-lang/rust/blob/531cb83fc/src/bootstrap/src/utils/channel.rs#L73
+            // * https://github.com/rust-lang/rust/blob/531cb83fc/compiler/rustc_driver_impl/src/lib.rs#L911-L913
+            #[cfg(debug_assertions)]
+            if hash != "unknown" {
+                debug_assert!(
+                    hash.chars().all(|ch| ch.is_ascii_hexdigit()),
+                    "commit hash must be a hex string, got: {hash:?}"
+                );
+                debug_assert!(
+                    hash.len() == 40 || hash.len() == 64,
+                    "hex string must be generated from sha1 or sha256 (i.e., it must be 40 or 64 characters long)\ngot: {hash:?}"
+                );
+            }
+            hash.to_string()
+        });
 
         Ok(Rustc {
             path,
@@ -87,24 +110,31 @@ impl Rustc {
             verbose_version,
             version,
             host,
+            commit_hash,
             cache: Mutex::new(cache),
         })
     }
 
     /// Gets a process builder set up to use the found rustc version, with a wrapper if `Some`.
     pub fn process(&self) -> ProcessBuilder {
-        ProcessBuilder::new(self.path.as_path()).wrapped(self.wrapper.as_ref())
+        let mut cmd = ProcessBuilder::new(self.path.as_path()).wrapped(self.wrapper.as_ref());
+        cmd.retry_with_argfile(true);
+        cmd
     }
 
     /// Gets a process builder set up to use the found rustc version, with a wrapper if `Some`.
     pub fn workspace_process(&self) -> ProcessBuilder {
-        ProcessBuilder::new(self.path.as_path())
+        let mut cmd = ProcessBuilder::new(self.path.as_path())
             .wrapped(self.workspace_wrapper.as_ref())
-            .wrapped(self.wrapper.as_ref())
+            .wrapped(self.wrapper.as_ref());
+        cmd.retry_with_argfile(true);
+        cmd
     }
 
     pub fn process_no_wrapper(&self) -> ProcessBuilder {
-        ProcessBuilder::new(&self.path)
+        let mut cmd = ProcessBuilder::new(&self.path);
+        cmd.retry_with_argfile(true);
+        cmd
     }
 
     /// Gets the output for the given command.
@@ -167,10 +197,11 @@ impl Cache {
         rustc: &Path,
         rustup_rustc: &Path,
         cache_location: Option<PathBuf>,
+        gctx: &GlobalContext,
     ) -> Cache {
         match (
             cache_location,
-            rustc_fingerprint(wrapper, workspace_wrapper, rustc, rustup_rustc),
+            rustc_fingerprint(wrapper, workspace_wrapper, rustc, rustup_rustc, gctx),
         ) {
             (Some(cache_location), Ok(rustc_fingerprint)) => {
                 let empty = CacheData {
@@ -231,10 +262,7 @@ impl Cache {
         } else {
             debug!("rustc info cache miss");
             debug!("running {}", cmd);
-            let output = cmd
-                .build_command()
-                .output()
-                .with_context(|| format!("could not execute process {} (never executed)", cmd))?;
+            let output = cmd.output()?;
             let stdout = String::from_utf8(output.stdout)
                 .map_err(|e| anyhow::anyhow!("{}: {:?}", e, e.as_bytes()))
                 .with_context(|| format!("`{}` didn't return utf8 output", cmd))?;
@@ -293,6 +321,7 @@ fn rustc_fingerprint(
     workspace_wrapper: Option<&Path>,
     rustc: &Path,
     rustup_rustc: &Path,
+    gctx: &GlobalContext,
 ) -> CargoResult<u64> {
     let mut hasher = StableHasher::new();
 
@@ -326,8 +355,8 @@ fn rustc_fingerprint(
     let maybe_rustup = rustup_rustc == rustc;
     match (
         maybe_rustup,
-        env::var("RUSTUP_HOME"),
-        env::var("RUSTUP_TOOLCHAIN"),
+        gctx.get_env("RUSTUP_HOME"),
+        gctx.get_env("RUSTUP_TOOLCHAIN"),
     ) {
         (_, Ok(rustup_home), Ok(rustup_toolchain)) => {
             debug!("adding rustup info to rustc fingerprint");
@@ -351,7 +380,7 @@ fn rustc_fingerprint(
 fn process_fingerprint(cmd: &ProcessBuilder, extra_fingerprint: u64) -> u64 {
     let mut hasher = StableHasher::new();
     extra_fingerprint.hash(&mut hasher);
-    cmd.get_args().hash(&mut hasher);
+    cmd.get_args().for_each(|arg| arg.hash(&mut hasher));
     let mut env = cmd.get_envs().iter().collect::<Vec<_>>();
     env.sort_unstable();
     env.hash(&mut hasher);

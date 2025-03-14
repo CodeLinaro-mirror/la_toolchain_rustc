@@ -119,7 +119,7 @@ In [MIR] there is no difference between method calls and function calls anymore.
 
 ## Conditions
 
-`if` conditions and `match` statements for `enum`s without variants with fields are
+`if` conditions and `match` statements for `enum`s with variants that have no fields are
 lowered to `TerminatorKind::SwitchInt`. Each possible value (so `0` and `1` for `if`
 conditions) has a corresponding `BasicBlock` to which the code continues.
 The argument being branched on is (again) an `Operand` representing the value of
@@ -145,4 +145,4 @@ case of `enum`s.
 [THIR]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_build/thir/index.html
 
 [`rustc_mir_build::thir::cx::expr`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_build/thir/cx/expr/index.html
-[`mir_built`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_build/build/fn.mir_built.html
+[`mir_built`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_transform/fn.mir_built.html

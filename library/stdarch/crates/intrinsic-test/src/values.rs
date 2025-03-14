@@ -1,20 +1,14 @@
-/// Gets a hex constant value for a single lane in in a determistic way
+/// Get a single value for an argument values array in a determistic way.
 /// * `bits`: The number of bits for the type, only 8, 16, 32, 64 are valid values
-/// * `simd`: The index of the simd lane we are generating for
-/// * `pass`: The index of the pass we are generating the values for
-pub fn values_for_pass(bits: u32, simd: u32, pass: usize) -> String {
-    let index = pass + (simd as usize);
-
-    if bits == 8 {
-        format!("{:#X}", VALUES_8[index % VALUES_8.len()])
-    } else if bits == 16 {
-        format!("{:#X}", VALUES_16[index % VALUES_16.len()])
-    } else if bits == 32 {
-        format!("{:#X}", VALUES_32[index % VALUES_32.len()])
-    } else if bits == 64 {
-        format!("{:#X}", VALUES_64[index % VALUES_64.len()])
-    } else {
-        panic!("Unknown size: {}", bits);
+/// * `index`: The position in the array we are generating for
+pub fn value_for_array(bits: u32, index: u32) -> u64 {
+    let index = index as usize;
+    match bits {
+        8 => VALUES_8[index % VALUES_8.len()].into(),
+        16 => VALUES_16[index % VALUES_16.len()].into(),
+        32 => VALUES_32[index % VALUES_32.len()].into(),
+        64 => VALUES_64[index % VALUES_64.len()].into(),
+        _ => unimplemented!("value_for_array(bits: {bits}, ..)"),
     }
 }
 

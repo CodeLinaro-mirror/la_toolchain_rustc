@@ -2,7 +2,7 @@
 <!--
 Thanks for submitting a pull request 🎉! Here are some tips for you:
 
-* If this is your first contribution, read "Cargo Contribution Guide":
+* If this is your first contribution, read "Cargo Contribution Guide" first:
   https://doc.crates.io/contrib/
 * Run `cargo fmt --all` to format your code changes.
 * Small commits and pull requests are always preferable and easy to review.

@@ -1,10 +1,10 @@
 # Splitting Borrows
 
 The mutual exclusion property of mutable references can be very limiting when
-working with a composite structure. The borrow checker understands some basic
-stuff, but will fall over pretty easily. It does understand structs
-sufficiently to know that it's possible to borrow disjoint fields of a struct
-simultaneously. So this works today:
+working with a composite structure. The borrow checker (a.k.a. borrowck)
+understands some basic stuff, but will fall over pretty easily. It does
+understand structs sufficiently to know that it's possible to borrow disjoint
+fields of a struct simultaneously. So this works today:
 
 ```rust
 struct Foo {
@@ -159,7 +159,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let slice = mem::replace(&mut self.0, &mut []);
+        let slice = mem::take(&mut self.0);
         if slice.is_empty() { return None; }
 
         let (l, r) = slice.split_at_mut(1);
@@ -170,7 +170,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
 impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let slice = mem::replace(&mut self.0, &mut []);
+        let slice = mem::take(&mut self.0);
         if slice.is_empty() { return None; }
 
         let new_len = slice.len() - 1;

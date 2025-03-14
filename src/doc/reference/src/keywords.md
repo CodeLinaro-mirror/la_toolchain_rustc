@@ -20,7 +20,7 @@ be used as the names of:
 * [Macro placeholders]
 * [Crates]
 
-> **<sup>Lexer:<sup>**\
+> **<sup>Lexer:</sup>**\
 > KW_AS             : `as`\
 > KW_BREAK          : `break`\
 > KW_CONST          : `const`\
@@ -106,16 +106,19 @@ is possible to declare a variable or method with the name `union`.
   fn invalid_lifetime_parameter<'static>(s: &'static str) -> &'static str { s }
   ```
 * In the 2015 edition, [`dyn`] is a keyword when used in a type position
-  followed by a path that does not start with `::`.
+  followed by a path that does not start with `::` or `<`, a lifetime, a question mark, a `for`
+  keyword or an opening parenthesis.
 
   Beginning in the 2018 edition, `dyn` has been promoted to a strict keyword.
 
 > **<sup>Lexer</sup>**\
+> KW_MACRO_RULES    : `macro_rules`\
 > KW_UNION          : `union`\
 > KW_STATICLIFETIME : `'static`
 >
 > **<sup>Lexer 2015</sup>**\
 > KW_DYN            : `dyn`
+* `safe` is used for functions and statics, which has meaning in [external blocks].
 
 [items]: items.md
 [Variables]: variables.md
@@ -130,3 +133,4 @@ is possible to declare a variable or method with the name `union`.
 [`dyn`]: types/trait-object.md
 [loop label]: expressions/loop-expr.md#loop-labels
 [generic lifetime parameter]: items/generics.md
+[external blocks]: items/external-blocks.md

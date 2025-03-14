@@ -1,15 +1,36 @@
+//! Type definitions for the result of a compilation.
+
 use std::collections::{BTreeSet, HashMap};
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use cargo_platform::CfgExpr;
 use cargo_util::{paths, ProcessBuilder};
 
-use super::BuildContext;
+use crate::core::compiler::apply_env_config;
+use crate::core::compiler::BuildContext;
 use crate::core::compiler::{CompileKind, Metadata, Unit};
 use crate::core::Package;
-use crate::util::{config, CargoResult, Config};
+use crate::util::{context, CargoResult, GlobalContext};
+
+/// Represents the kind of process we are creating.
+#[derive(Debug)]
+enum ToolKind {
+    /// See [`Compilation::rustc_process`].
+    Rustc,
+    /// See [`Compilation::rustdoc_process`].
+    Rustdoc,
+    /// See [`Compilation::host_process`].
+    HostProcess,
+    /// See [`Compilation::target_process`].
+    TargetProcess,
+}
+
+impl ToolKind {
+    fn is_rustc_tool(&self) -> bool {
+        matches!(self, ToolKind::Rustc | ToolKind::Rustdoc)
+    }
+}
 
 /// Structure with enough information to run `rustdoc --test`.
 pub struct Doctest {
@@ -25,6 +46,9 @@ pub struct Doctest {
     ///
     /// This is used for indexing [`Compilation::extra_env`].
     pub script_meta: Option<Metadata>,
+
+    /// Environment variables to set in the rustdoc process.
+    pub env: HashMap<String, OsString>,
 }
 
 /// Information about the output of a unit.
@@ -41,7 +65,7 @@ pub struct UnitOutput {
 }
 
 /// A structure returning the result of a compilation.
-pub struct Compilation<'cfg> {
+pub struct Compilation<'gctx> {
     /// An array of all tests created during this compilation.
     pub tests: Vec<UnitOutput>,
 
@@ -69,9 +93,6 @@ pub struct Compilation<'cfg> {
     /// May be for the host or for a specific target.
     pub deps_output: HashMap<CompileKind, PathBuf>,
 
-    /// The path to the host libdir for the compiler used
-    sysroot_host_libdir: PathBuf,
-
     /// The path to libstd for each target
     sysroot_target_libdir: HashMap<CompileKind, PathBuf>,
 
@@ -88,7 +109,7 @@ pub struct Compilation<'cfg> {
     /// The target host triple.
     pub host: String,
 
-    config: &'cfg Config,
+    gctx: &'gctx GlobalContext,
 
     /// Rustc process to be used by default
     rustc_process: ProcessBuilder,
@@ -99,15 +120,17 @@ pub struct Compilation<'cfg> {
     primary_rustc_process: Option<ProcessBuilder>,
 
     target_runners: HashMap<CompileKind, Option<(PathBuf, Vec<String>)>>,
+    /// The linker to use for each host or target.
+    target_linkers: HashMap<CompileKind, Option<PathBuf>>,
 }
 
-impl<'cfg> Compilation<'cfg> {
-    pub fn new<'a>(bcx: &BuildContext<'a, 'cfg>) -> CargoResult<Compilation<'cfg>> {
+impl<'gctx> Compilation<'gctx> {
+    pub fn new<'a>(bcx: &BuildContext<'a, 'gctx>) -> CargoResult<Compilation<'gctx>> {
         let mut rustc = bcx.rustc().process();
         let mut primary_rustc_process = bcx.build_config.primary_unit_rustc.clone();
         let mut rustc_workspace_wrapper_process = bcx.rustc().workspace_process();
 
-        if bcx.config.extra_verbose() {
+        if bcx.gctx.extra_verbose() {
             rustc.display_env_vars();
             rustc_workspace_wrapper_process.display_env_vars();
 
@@ -117,32 +140,17 @@ impl<'cfg> Compilation<'cfg> {
         }
 
         Ok(Compilation {
-            // TODO: deprecated; remove.
             native_dirs: BTreeSet::new(),
             root_output: HashMap::new(),
             deps_output: HashMap::new(),
-            sysroot_host_libdir: bcx
-                .target_data
-                .info(CompileKind::Host)
-                .sysroot_host_libdir
-                .clone(),
-            sysroot_target_libdir: bcx
-                .all_kinds
-                .iter()
-                .map(|&kind| {
-                    (
-                        kind,
-                        bcx.target_data.info(kind).sysroot_target_libdir.clone(),
-                    )
-                })
-                .collect(),
+            sysroot_target_libdir: get_sysroot_target_libdir(bcx)?,
             tests: Vec::new(),
             binaries: Vec::new(),
             cdylibs: Vec::new(),
             root_crate_names: Vec::new(),
             extra_env: HashMap::new(),
             to_doc_test: Vec::new(),
-            config: bcx.config,
+            gctx: bcx.gctx,
             host: bcx.host_triple().to_string(),
             rustc_process: rustc,
             rustc_workspace_wrapper_process,
@@ -154,6 +162,13 @@ impl<'cfg> Compilation<'cfg> {
                 .chain(Some(&CompileKind::Host))
                 .map(|kind| Ok((*kind, target_runner(bcx, *kind)?)))
                 .collect::<CargoResult<HashMap<_, _>>>()?,
+            target_linkers: bcx
+                .build_config
+                .requested_kinds
+                .iter()
+                .chain(Some(&CompileKind::Host))
+                .map(|kind| Ok((*kind, target_linker(bcx, *kind)?)))
+                .collect::<CargoResult<HashMap<_, _>>>()?,
         })
     }
 
@@ -161,7 +176,7 @@ impl<'cfg> Compilation<'cfg> {
     ///
     /// `is_primary` is true if this is a "primary package", which means it
     /// was selected by the user on the command-line (such as with a `-p`
-    /// flag), see [`crate::core::compiler::Context::primary_packages`].
+    /// flag), see [`crate::core::compiler::BuildRunner::primary_packages`].
     ///
     /// `is_workspace` is true if this is a workspace member.
     pub fn rustc_process(
@@ -179,7 +194,7 @@ impl<'cfg> Compilation<'cfg> {
         };
 
         let cmd = fill_rustc_tool_env(rustc, unit);
-        self.fill_env(cmd, &unit.pkg, None, unit.kind, true)
+        self.fill_env(cmd, &unit.pkg, None, unit.kind, ToolKind::Rustc)
     }
 
     /// Returns a [`ProcessBuilder`] for running `rustdoc`.
@@ -188,16 +203,17 @@ impl<'cfg> Compilation<'cfg> {
         unit: &Unit,
         script_meta: Option<Metadata>,
     ) -> CargoResult<ProcessBuilder> {
-        let rustdoc = ProcessBuilder::new(&*self.config.rustdoc()?);
+        let rustdoc = ProcessBuilder::new(&*self.gctx.rustdoc()?);
         let cmd = fill_rustc_tool_env(rustdoc, unit);
-        let mut p = self.fill_env(cmd, &unit.pkg, script_meta, unit.kind, true)?;
-        unit.target.edition().cmd_edition_arg(&mut p);
+        let mut cmd = self.fill_env(cmd, &unit.pkg, script_meta, unit.kind, ToolKind::Rustdoc)?;
+        cmd.retry_with_argfile(true);
+        unit.target.edition().cmd_edition_arg(&mut cmd);
 
         for crate_type in unit.target.rustc_crate_types() {
-            p.arg("--crate-type").arg(crate_type.as_str());
+            cmd.arg("--crate-type").arg(crate_type.as_str());
         }
 
-        Ok(p)
+        Ok(cmd)
     }
 
     /// Returns a [`ProcessBuilder`] appropriate for running a process for the
@@ -216,12 +232,17 @@ impl<'cfg> Compilation<'cfg> {
             pkg,
             None,
             CompileKind::Host,
-            false,
+            ToolKind::HostProcess,
         )
     }
 
     pub fn target_runner(&self, kind: CompileKind) -> Option<&(PathBuf, Vec<String>)> {
         self.target_runners.get(&kind).and_then(|x| x.as_ref())
+    }
+
+    /// Gets the user-specified linker for a particular host or target.
+    pub fn target_linker(&self, kind: CompileKind) -> Option<PathBuf> {
+        self.target_linkers.get(&kind).and_then(|x| x.clone())
     }
 
     /// Returns a [`ProcessBuilder`] appropriate for running a process for the
@@ -246,7 +267,14 @@ impl<'cfg> Compilation<'cfg> {
         } else {
             ProcessBuilder::new(cmd)
         };
-        self.fill_env(builder, pkg, script_meta, kind, false)
+        let tool_kind = ToolKind::TargetProcess;
+        let mut builder = self.fill_env(builder, pkg, script_meta, kind, tool_kind)?;
+
+        if let Some(client) = self.gctx.jobserver_from_env() {
+            builder.inherit_jobserver(client);
+        }
+
+        Ok(builder)
     }
 
     /// Prepares a new process with an appropriate environment to run against
@@ -260,12 +288,23 @@ impl<'cfg> Compilation<'cfg> {
         pkg: &Package,
         script_meta: Option<Metadata>,
         kind: CompileKind,
-        is_rustc_tool: bool,
+        tool_kind: ToolKind,
     ) -> CargoResult<ProcessBuilder> {
         let mut search_path = Vec::new();
-        if is_rustc_tool {
+        if tool_kind.is_rustc_tool() {
+            if matches!(tool_kind, ToolKind::Rustdoc) {
+                // HACK: `rustdoc --test` not only compiles but executes doctests.
+                // Ideally only execution phase should have search paths appended,
+                // so the executions can find native libs just like other tests.
+                // However, there is no way to separate these two phase, so this
+                // hack is added for both phases.
+                // TODO: handle doctest-xcompile
+                search_path.extend(super::filter_dynamic_search_path(
+                    self.native_dirs.iter(),
+                    &self.root_output[&CompileKind::Host],
+                ));
+            }
             search_path.push(self.deps_output[&CompileKind::Host].clone());
-            search_path.push(self.sysroot_host_libdir.clone());
         } else {
             search_path.extend(super::filter_dynamic_search_path(
                 self.native_dirs.iter(),
@@ -277,19 +316,23 @@ impl<'cfg> Compilation<'cfg> {
             // libs from the sysroot that ships with rustc. This may not be
             // required (at least I cannot craft a situation where it
             // matters), but is here to be safe.
-            if self.config.cli_unstable().build_std.is_none() {
+            if self.gctx.cli_unstable().build_std.is_none() {
                 search_path.push(self.sysroot_target_libdir[&kind].clone());
             }
         }
 
         let dylib_path = paths::dylib_path();
         let dylib_path_is_empty = dylib_path.is_empty();
-        search_path.extend(dylib_path.into_iter());
+        if dylib_path.starts_with(&search_path) {
+            search_path = dylib_path;
+        } else {
+            search_path.extend(dylib_path.into_iter());
+        }
         if cfg!(target_os = "macos") && dylib_path_is_empty {
             // These are the defaults when DYLD_FALLBACK_LIBRARY_PATH isn't
             // set or set to an empty string. Since Cargo is explicitly setting
             // the value, make sure the defaults still work.
-            if let Some(home) = env::var_os("HOME") {
+            if let Some(home) = self.gctx.get_env_os("HOME") {
                 search_path.push(PathBuf::from(home).join("lib"));
             }
             search_path.push(PathBuf::from("/usr/local/lib"));
@@ -308,14 +351,16 @@ impl<'cfg> Compilation<'cfg> {
 
         let metadata = pkg.manifest().metadata();
 
-        let cargo_exe = self.config.cargo_exe()?;
+        let cargo_exe = self.gctx.cargo_exe()?;
         cmd.env(crate::CARGO_ENV, cargo_exe);
 
         // When adding new environment variables depending on
         // crate properties which might require rebuild upon change
         // consider adding the corresponding properties to the hash
         // in BuildContext::target_metadata()
+        let rust_version = pkg.rust_version().as_ref().map(ToString::to_string);
         cmd.env("CARGO_MANIFEST_DIR", pkg.root())
+            .env("CARGO_MANIFEST_PATH", pkg.manifest_path())
             .env("CARGO_PKG_VERSION_MAJOR", &pkg.version().major.to_string())
             .env("CARGO_PKG_VERSION_MINOR", &pkg.version().minor.to_string())
             .env("CARGO_PKG_VERSION_PATCH", &pkg.version().patch.to_string())
@@ -343,19 +388,17 @@ impl<'cfg> Compilation<'cfg> {
                 metadata.license_file.as_ref().unwrap_or(&String::new()),
             )
             .env("CARGO_PKG_AUTHORS", &pkg.authors().join(":"))
+            .env(
+                "CARGO_PKG_RUST_VERSION",
+                &rust_version.as_deref().unwrap_or_default(),
+            )
+            .env(
+                "CARGO_PKG_README",
+                metadata.readme.as_ref().unwrap_or(&String::new()),
+            )
             .cwd(pkg.root());
 
-        // Apply any environment variables from the config
-        for (key, value) in self.config.env_config()?.iter() {
-            // never override a value that has already been set by cargo
-            if cmd.get_envs().contains_key(key) {
-                continue;
-            }
-
-            if value.is_force() || env::var_os(key).is_none() {
-                cmd.env(key, value.resolve(self.config));
-            }
-        }
+        apply_env_config(self.gctx, &mut cmd)?;
 
         Ok(cmd)
     }
@@ -364,7 +407,7 @@ impl<'cfg> Compilation<'cfg> {
 /// Prepares a rustc_tool process with additional environment variables
 /// that are only relevant in a context that has a unit
 fn fill_rustc_tool_env(mut cmd: ProcessBuilder, unit: &Unit) -> ProcessBuilder {
-    if unit.target.is_bin() {
+    if unit.target.is_executable() {
         let name = unit
             .target
             .binary_filename()
@@ -376,6 +419,35 @@ fn fill_rustc_tool_env(mut cmd: ProcessBuilder, unit: &Unit) -> ProcessBuilder {
     cmd
 }
 
+fn get_sysroot_target_libdir(
+    bcx: &BuildContext<'_, '_>,
+) -> CargoResult<HashMap<CompileKind, PathBuf>> {
+    bcx.all_kinds
+        .iter()
+        .map(|&kind| {
+            let Some(info) = bcx.target_data.get_info(kind) else {
+                let target = match kind {
+                    CompileKind::Host => "host".to_owned(),
+                    CompileKind::Target(s) => s.short_name().to_owned(),
+                };
+
+                let dependency = bcx
+                    .unit_graph
+                    .iter()
+                    .find_map(|(u, _)| (u.kind == kind).then_some(u.pkg.summary().package_id()))
+                    .unwrap();
+
+                anyhow::bail!(
+                    "could not find specification for target `{target}`.\n  \
+                    Dependency `{dependency}` requires to build for target `{target}`."
+                )
+            };
+
+            Ok((kind, info.sysroot_target_libdir.clone()))
+        })
+        .collect()
+}
+
 fn target_runner(
     bcx: &BuildContext<'_, '_>,
     kind: CompileKind,
@@ -385,15 +457,15 @@ fn target_runner(
     // try target.{}.runner
     let key = format!("target.{}.runner", target);
 
-    if let Some(v) = bcx.config.get::<Option<config::PathAndArgs>>(&key)? {
-        let path = v.path.resolve_program(bcx.config);
+    if let Some(v) = bcx.gctx.get::<Option<context::PathAndArgs>>(&key)? {
+        let path = v.path.resolve_program(bcx.gctx);
         return Ok(Some((path, v.args)));
     }
 
     // try target.'cfg(...)'.runner
     let target_cfg = bcx.target_data.info(kind).cfg();
     let mut cfgs = bcx
-        .config
+        .gctx
         .target_cfgs()?
         .iter()
         .filter_map(|(key, cfg)| cfg.runner.as_ref().map(|runner| (key, runner)))
@@ -401,7 +473,7 @@ fn target_runner(
     let matching_runner = cfgs.next();
     if let Some((key, runner)) = cfgs.next() {
         anyhow::bail!(
-            "several matching instances of `target.'cfg(..)'.runner` in `.cargo/config`\n\
+            "several matching instances of `target.'cfg(..)'.runner` in configurations\n\
              first match `{}` located in {}\n\
              second match `{}` located in {}",
             matching_runner.unwrap().0,
@@ -412,8 +484,44 @@ fn target_runner(
     }
     Ok(matching_runner.map(|(_k, runner)| {
         (
-            runner.val.path.clone().resolve_program(bcx.config),
+            runner.val.path.clone().resolve_program(bcx.gctx),
             runner.val.args.clone(),
         )
     }))
+}
+
+/// Gets the user-specified linker for a particular host or target from the configuration.
+fn target_linker(bcx: &BuildContext<'_, '_>, kind: CompileKind) -> CargoResult<Option<PathBuf>> {
+    // Try host.linker and target.{}.linker.
+    if let Some(path) = bcx
+        .target_data
+        .target_config(kind)
+        .linker
+        .as_ref()
+        .map(|l| l.val.clone().resolve_program(bcx.gctx))
+    {
+        return Ok(Some(path));
+    }
+
+    // Try target.'cfg(...)'.linker.
+    let target_cfg = bcx.target_data.info(kind).cfg();
+    let mut cfgs = bcx
+        .gctx
+        .target_cfgs()?
+        .iter()
+        .filter_map(|(key, cfg)| cfg.linker.as_ref().map(|linker| (key, linker)))
+        .filter(|(key, _linker)| CfgExpr::matches_key(key, target_cfg));
+    let matching_linker = cfgs.next();
+    if let Some((key, linker)) = cfgs.next() {
+        anyhow::bail!(
+            "several matching instances of `target.'cfg(..)'.linker` in configurations\n\
+             first match `{}` located in {}\n\
+             second match `{}` located in {}",
+            matching_linker.unwrap().0,
+            matching_linker.unwrap().1.definition,
+            key,
+            linker.definition
+        );
+    }
+    Ok(matching_linker.map(|(_k, linker)| linker.val.clone().resolve_program(bcx.gctx)))
 }

@@ -49,7 +49,6 @@ pub struct IntoIter<T> {
     cap: usize,
     start: *const T,
     end: *const T,
-    _marker: PhantomData<T>,
 }
 ```
 
@@ -57,29 +56,28 @@ And this is what we end up with for initialization:
 
 <!-- ignore: simplified code -->
 ```rust,ignore
-impl<T> Vec<T> {
-    pub fn into_iter(self) -> IntoIter<T> {
+impl<T> IntoIterator for Vec<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+    fn into_iter(self) -> IntoIter<T> {
+        // Make sure not to drop Vec since that would free the buffer
+        let vec = ManuallyDrop::new(self);
+
         // Can't destructure Vec since it's Drop
-        let ptr = self.ptr;
-        let cap = self.cap;
-        let len = self.len;
+        let ptr = vec.ptr;
+        let cap = vec.cap;
+        let len = vec.len;
 
-        // Make sure not to drop Vec since that will free the buffer
-        mem::forget(self);
-
-        unsafe {
-            IntoIter {
-                buf: ptr,
-                cap: cap,
-                start: ptr.as_ptr(),
-                end: if cap == 0 {
-                    // can't offset off this pointer, it's not allocated!
-                    ptr.as_ptr()
-                } else {
-                    ptr.as_ptr().add(len)
-                },
-                _marker: PhantomData,
-            }
+        IntoIter {
+            buf: ptr,
+            cap,
+            start: ptr.as_ptr(),
+            end: if cap == 0 {
+                // can't offset off this pointer, it's not allocated!
+                ptr.as_ptr()
+            } else {
+                unsafe { ptr.as_ptr().add(len) }
+            },
         }
     }
 }

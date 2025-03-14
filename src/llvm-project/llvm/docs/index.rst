@@ -24,6 +24,12 @@ Several introductory papers and presentations.
    FAQ
    Lexicon
 
+:doc:`FAQ`
+  Frequently asked questions.
+
+:doc:`Lexicon`
+  Glossary.
+
 `Introduction to the LLVM Compiler`__
   Presentation providing a users introduction to LLVM.
 
@@ -83,7 +89,7 @@ LLVM welcomes contributions of all kinds. To learn more, see the following artic
 
 * :doc:`GettingInvolved`
 * :ref:`development-process`
-* :ref:`mailing-lists`
+* :ref:`lists-forums`
 * :ref:`meetups-social-events`
 * :ref:`community-proposals`
 

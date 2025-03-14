@@ -1,13 +1,13 @@
-use crate::ty::subst::SubstsRef;
-use crate::ty::{self, Ty, TyCtxt};
 use rustc_hir as hir;
-use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
-use rustc_macros::HashStable;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
 use rustc_span::Span;
+use rustc_target::abi::FieldIdx;
+
+use crate::ty::{self, Ty, TyCtxt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
-pub enum PointerCast {
+pub enum PointerCoercion {
     /// Go from a fn-item type to a fn-pointer type.
     ReifyFnPointer,
 
@@ -16,7 +16,7 @@ pub enum PointerCast {
 
     /// Go from a non-capturing closure to an fn pointer or an unsafe fn pointer.
     /// It cannot convert a closure that requires unsafe.
-    ClosureFnPointer(hir::Unsafety),
+    ClosureFnPointer(hir::Safety),
 
     /// Go from a mut raw pointer to a const raw pointer.
     MutToConstPointer,
@@ -25,16 +25,19 @@ pub enum PointerCast {
     ArrayToPointer,
 
     /// Unsize a pointer/reference value, e.g., `&[T; n]` to
-    /// `&[T]`. Note that the source could be a thin or fat pointer.
-    /// This will do things like convert thin pointers to fat
+    /// `&[T]`. Note that the source could be a thin or wide pointer.
+    /// This will do things like convert thin pointers to wide
     /// pointers, or convert structs containing thin pointers to
-    /// structs containing fat pointers, or convert between fat
+    /// structs containing wide pointers, or convert between wide
     /// pointers. We don't store the details of how the transform is
     /// done (in fact, we don't know that, because it might depend on
     /// the precise type parameters). We just store the target
     /// type. Codegen backends and miri figure out what has to be done
     /// based on the precise source/target type at hand.
     Unsize,
+
+    /// Go from a pointer-like type to a `dyn*` object.
+    DynStar,
 }
 
 /// Represents coercing a value to a different type of value.
@@ -59,7 +62,7 @@ pub enum PointerCast {
 ///    sized struct to a dynamically sized one. E.g., `&[i32; 4]` -> `&[i32]` is
 ///    represented by:
 ///
-///    ```
+///    ```ignore (illustrative)
 ///    Deref(None) -> [i32; 4],
 ///    Borrow(AutoBorrow::Ref) -> &[i32; 4],
 ///    Unsize -> &[i32],
@@ -77,7 +80,7 @@ pub enum PointerCast {
 ///    At some point, of course, `Box` should move out of the compiler, in which
 ///    case this is analogous to transforming a struct. E.g., `Box<[i32; 4]>` ->
 ///    `Box<[i32]>` is an `Adjust::Unsize` with the target `Box<[i32]>`.
-#[derive(Clone, TyEncodable, TyDecodable, HashStable, TypeFoldable)]
+#[derive(Clone, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub struct Adjustment<'tcx> {
     pub kind: Adjust<'tcx>,
     pub target: Ty<'tcx>,
@@ -89,7 +92,7 @@ impl<'tcx> Adjustment<'tcx> {
     }
 }
 
-#[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable)]
+#[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub enum Adjust<'tcx> {
     /// Go from ! to any type.
     NeverToAny,
@@ -100,14 +103,18 @@ pub enum Adjust<'tcx> {
     /// Take the address and produce either a `&` or `*` pointer.
     Borrow(AutoBorrow<'tcx>),
 
-    Pointer(PointerCast),
+    Pointer(PointerCoercion),
+
+    /// Take a pinned reference and reborrow as a `Pin<&mut T>` or `Pin<&T>`.
+    ReborrowPin(ty::Region<'tcx>, hir::Mutability),
 }
 
 /// An overloaded autoderef step, representing a `Deref(Mut)::deref(_mut)`
 /// call, with the signature `&'a T -> &'a U` or `&'a mut T -> &'a mut U`.
 /// The target type is `U` in both cases, with the region and mutability
 /// being those shared by both the receiver and the returned reference.
-#[derive(Copy, Clone, PartialEq, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable)]
+#[derive(Copy, Clone, PartialEq, Debug, TyEncodable, TyDecodable, HashStable)]
+#[derive(TypeFoldable, TypeVisitable)]
 pub struct OverloadedDeref<'tcx> {
     pub region: ty::Region<'tcx>,
     pub mutbl: hir::Mutability,
@@ -117,7 +124,8 @@ pub struct OverloadedDeref<'tcx> {
 }
 
 impl<'tcx> OverloadedDeref<'tcx> {
-    pub fn method_call(&self, tcx: TyCtxt<'tcx>, source: Ty<'tcx>) -> (DefId, SubstsRef<'tcx>) {
+    /// Get the zst function item type for this method call.
+    pub fn method_call(&self, tcx: TyCtxt<'tcx>, source: Ty<'tcx>) -> Ty<'tcx> {
         let trait_def_id = match self.mutbl {
             hir::Mutability::Not => tcx.require_lang_item(LangItem::Deref, None),
             hir::Mutability::Mut => tcx.require_lang_item(LangItem::DerefMut, None),
@@ -128,7 +136,7 @@ impl<'tcx> OverloadedDeref<'tcx> {
             .find(|m| m.kind == ty::AssocKind::Fn)
             .unwrap()
             .def_id;
-        (method_def_id, tcx.mk_substs_trait(source, &[]))
+        Ty::new_fn_def(tcx, method_def_id, [source])
     }
 }
 
@@ -156,6 +164,18 @@ pub enum AutoBorrowMutability {
     Not,
 }
 
+impl AutoBorrowMutability {
+    /// Creates an `AutoBorrowMutability` from a mutability and allowance of two phase borrows.
+    ///
+    /// Note that when `mutbl.is_not()`, `allow_two_phase_borrow` is ignored
+    pub fn new(mutbl: hir::Mutability, allow_two_phase_borrow: AllowTwoPhase) -> Self {
+        match mutbl {
+            hir::Mutability::Not => Self::Not,
+            hir::Mutability::Mut => Self::Mut { allow_two_phase_borrow },
+        }
+    }
+}
+
 impl From<AutoBorrowMutability> for hir::Mutability {
     fn from(m: AutoBorrowMutability) -> Self {
         match m {
@@ -165,7 +185,8 @@ impl From<AutoBorrowMutability> for hir::Mutability {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable)]
+#[derive(Copy, Clone, PartialEq, Debug, TyEncodable, TyDecodable, HashStable)]
+#[derive(TypeFoldable, TypeVisitable)]
 pub enum AutoBorrow<'tcx> {
     /// Converts from T to &T.
     Ref(ty::Region<'tcx>, AutoBorrowMutability),
@@ -192,5 +213,5 @@ pub struct CoerceUnsizedInfo {
 #[derive(Clone, Copy, TyEncodable, TyDecodable, Debug, HashStable)]
 pub enum CustomCoerceUnsized {
     /// Records the index of the field being coerced.
-    Struct(usize),
+    Struct(FieldIdx),
 }

@@ -1,5 +1,5 @@
 // The classification code for the x86_64 ABI is taken from the clay language
-// https://github.com/jckarter/clay/blob/master/compiler/src/externals.cpp
+// https://github.com/jckarter/clay/blob/db0bd2702ab0b6e48965cd85f8859bbd5f60e48e/compiler/externals.cpp
 
 use crate::abi::call::{ArgAbi, CastTarget, FnAbi, Reg, RegKind};
 use crate::abi::{self, Abi, HasDataLayout, Size, TyAbiInterface, TyAndLayout};
@@ -49,9 +49,9 @@ where
         let mut c = match layout.abi {
             Abi::Uninhabited => return Ok(()),
 
-            Abi::Scalar(scalar) => match scalar.value {
-                abi::Int(..) | abi::Pointer => Class::Int,
-                abi::F32 | abi::F64 => Class::Sse,
+            Abi::Scalar(scalar) => match scalar.primitive() {
+                abi::Int(..) | abi::Pointer(_) => Class::Int,
+                abi::Float(_) => Class::Sse,
             },
 
             Abi::Vector { .. } => Class::Sse,
@@ -170,7 +170,7 @@ fn cast_target(cls: &[Option<Class>], size: Size) -> CastTarget {
 const MAX_INT_REGS: usize = 6; // RDI, RSI, RDX, RCX, R8, R9
 const MAX_SSE_REGS: usize = 8; // XMM0-7
 
-pub fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>)
+pub(crate) fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>)
 where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout,
@@ -179,6 +179,10 @@ where
     let mut sse_regs = MAX_SSE_REGS;
 
     let mut x86_64_arg_or_ret = |arg: &mut ArgAbi<'a, Ty>, is_arg: bool| {
+        if !arg.layout.is_sized() {
+            // Not touching this...
+            return;
+        }
         let mut cls_or_mem = classify_arg(cx, arg);
 
         if is_arg {
@@ -213,7 +217,9 @@ where
         match cls_or_mem {
             Err(Memory) => {
                 if is_arg {
-                    arg.make_indirect_byval();
+                    // The x86_64 ABI doesn't have any special requirements for `byval` alignment,
+                    // the type's alignment is always used.
+                    arg.pass_by_stack_offset(None);
                 } else {
                     // `sret` parameter thus one less integer register available
                     arg.make_indirect();
@@ -227,7 +233,7 @@ where
                 // split into sized chunks passed individually
                 if arg.layout.is_aggregate() {
                     let size = arg.layout.size;
-                    arg.cast_to(cast_target(cls, size))
+                    arg.cast_to(cast_target(cls, size));
                 } else {
                     arg.extend_integer_width_to(32);
                 }
@@ -239,7 +245,7 @@ where
         x86_64_arg_or_ret(&mut fn_abi.ret, false);
     }
 
-    for arg in &mut fn_abi.args {
+    for arg in fn_abi.args.iter_mut() {
         if arg.is_ignore() {
             continue;
         }

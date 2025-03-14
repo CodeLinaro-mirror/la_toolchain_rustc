@@ -11,8 +11,8 @@ pub struct MemoryUsage {
 }
 
 impl fmt::Display for MemoryUsage {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "{}", self.allocated)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.allocated.fmt(f)
     }
 }
 
@@ -37,8 +37,7 @@ impl MemoryUsage {
                 // There doesn't seem to be an API for determining heap usage, so we try to
                 // approximate that by using the Commit Charge value.
 
-                use winapi::um::processthreadsapi::*;
-                use winapi::um::psapi::*;
+                use windows_sys::Win32::System::{Threading::*, ProcessStatus::*};
                 use std::mem::{MaybeUninit, size_of};
 
                 let proc = unsafe { GetCurrentProcess() };
@@ -91,13 +90,19 @@ fn memusage_linux() -> MemoryUsage {
 pub struct Bytes(isize);
 
 impl Bytes {
+    pub fn new(bytes: isize) -> Bytes {
+        Bytes(bytes)
+    }
+}
+
+impl Bytes {
     pub fn megabytes(self) -> isize {
         self.0 / 1024 / 1024
     }
 }
 
 impl fmt::Display for Bytes {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let bytes = self.0;
         let mut value = bytes;
         let mut suffix = "b";
@@ -109,7 +114,7 @@ impl fmt::Display for Bytes {
                 suffix = "mb";
             }
         }
-        f.pad(&format!("{}{}", value, suffix))
+        f.pad(&format!("{value}{suffix}"))
     }
 }
 

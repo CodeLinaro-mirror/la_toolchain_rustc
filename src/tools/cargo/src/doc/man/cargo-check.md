@@ -1,9 +1,11 @@
 # cargo-check(1)
-{{*set actionverb="Check"}}
+{{~*set command="check"}}
+{{~*set actionverb="Check"}}
+{{~*set multitarget=true}}
 
 ## NAME
 
-cargo-check - Check the current package
+cargo-check --- Check the current package
 
 ## SYNOPSIS
 
@@ -42,8 +44,6 @@ they have `required-features` that are missing.
 
 {{> options-profile-legacy-check }}
 
-{{> options-ignore-rust-version }}
-
 {{> options-timings }}
 
 {{/options}}
@@ -67,7 +67,11 @@ they have `required-features` that are missing.
 {{#options}}
 {{> options-manifest-path }}
 
+{{> options-ignore-rust-version }}
+
 {{> options-locked }}
+
+{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-options-common }}
@@ -76,6 +80,7 @@ they have `required-features` that are missing.
 
 {{#options}}
 {{> options-jobs }}
+{{> options-keep-going }}
 {{> options-future-incompat }}
 {{/options}}
 

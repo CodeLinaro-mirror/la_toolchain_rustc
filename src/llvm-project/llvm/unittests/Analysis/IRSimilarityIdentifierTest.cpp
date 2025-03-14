@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/IRSimilarityIdentifier.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -21,6 +22,11 @@
 
 using namespace llvm;
 using namespace IRSimilarity;
+
+extern llvm::cl::opt<bool> UseNewDbgInfoFormat;
+extern cl::opt<cl::boolOrDefault> PreserveInputDbgFormat;
+extern bool WriteNewDbgInfoFormatToBitcode;
+extern cl::opt<bool> WriteNewDbgInfoFormat;
 
 static std::unique_ptr<Module> makeLLVMModule(LLVMContext &Context,
                                               StringRef ModuleStr) {
@@ -809,7 +815,8 @@ TEST(IRInstructionMapper, PhiIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(3));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // In most cases, the illegal instructions we are collecting don't require any
@@ -844,7 +851,8 @@ TEST(IRInstructionMapper, AllocaIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // Checks that an getelementptr instruction is mapped to be legal.  And that
@@ -983,7 +991,8 @@ TEST(IRInstructionMapper, CallsIllegalIndirect) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // Checks that indirect call instructions are mapped to be legal when it is not
@@ -1265,7 +1274,8 @@ TEST(IRInstructionMapper, InvokeIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // Checks that an callbr instructions are considered to be illegal.  Callbr
@@ -1298,22 +1308,22 @@ TEST(IRInstructionMapper, CallBrInstIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
-// Checks that an debuginfo intrinsics are mapped to be invisible.  Since they
+// Checks that an debuginfo records are mapped to be invisible. Since they
 // do not semantically change the program, they can be recognized as similar.
 TEST(IRInstructionMapper, DebugInfoInvisible) {
   StringRef ModuleString = R"(
                           define i32 @f(i32 %a, i32 %b) {
                           then:
-                            %0 = add i32 %a, %b                    
-                            call void @llvm.dbg.value(metadata !0)
-                            %1 = add i32 %a, %b     
+                            %0 = add i32 %a, %b
+                              #dbg_value(i32 0, !0, !0, !0)
+                            %1 = add i32 %a, %b
                             ret i32 0
                           }
 
-                          declare void @llvm.dbg.value(metadata)
                           !0 = distinct !{!"test\00", i32 10})";
   LLVMContext Context;
   std::unique_ptr<Module> M = makeLLVMModule(Context, ModuleString);
@@ -1356,7 +1366,8 @@ TEST(IRInstructionMapper, ExceptionHandlingTypeIdIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // Checks that an eh.exceptioncode intrinsic is mapped to be illegal.
@@ -1388,7 +1399,8 @@ TEST(IRInstructionMapper, ExceptionHandlingExceptionCodeIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // Checks that an eh.unwind intrinsic is mapped to be illegal.
@@ -1413,7 +1425,8 @@ TEST(IRInstructionMapper, ExceptionHandlingUnwindIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // Checks that an eh.exceptionpointer intrinsic is mapped to be illegal.
@@ -1438,7 +1451,8 @@ TEST(IRInstructionMapper, ExceptionHandlingExceptionPointerIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // Checks that a catchpad instruction is mapped to an illegal value.
@@ -1469,7 +1483,8 @@ TEST(IRInstructionMapper, CatchpadIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // Checks that a cleanuppad instruction is mapped to an illegal value.
@@ -1500,7 +1515,8 @@ TEST(IRInstructionMapper, CleanuppadIllegal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   ASSERT_EQ(InstrList.size(), UnsignedVec.size());
-  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(0));
+  ASSERT_EQ(UnsignedVec.size(), static_cast<unsigned>(1));
+  ASSERT_GT(UnsignedVec[0], Mapper.IllegalInstrNumber);
 }
 
 // The following three instructions are memory transfer and setting based, which
@@ -1903,19 +1919,19 @@ TEST(IRSimilarityCandidate, CheckRegionsDifferentTypes) {
   ASSERT_FALSE(longSimCandCompare(InstrList));
 }
 
-// Check that debug instructions do not impact similarity. They are marked as
+// Check that debug records do not impact similarity. They are marked as
 // invisible.
 TEST(IRSimilarityCandidate, IdenticalWithDebug) {
   StringRef ModuleString = R"(
                           define i32 @f(i32 %a, i32 %b) {
                           bb0:
                              %0 = add i32 %a, %b
-                             call void @llvm.dbg.value(metadata !0)
+                               #dbg_value(i32 0, !0, !0, !0)
                              %1 = add i32 %b, %a
                              ret i32 0
                           bb1:
                              %2 = add i32 %a, %b
-                             call void @llvm.dbg.value(metadata !1)
+                               #dbg_value(i32 1, !1, !1, !1)
                              %3 = add i32 %b, %a
                              ret i32 0
                           bb2:
@@ -1924,7 +1940,6 @@ TEST(IRSimilarityCandidate, IdenticalWithDebug) {
                              ret i32 0       
                           }
 
-                          declare void @llvm.dbg.value(metadata)
                           !0 = distinct !{!"test\00", i32 10}
                           !1 = distinct !{!"test\00", i32 11})";
   LLVMContext Context;
@@ -2177,9 +2192,9 @@ TEST(IRSimilarityCandidate, CanonicalNumbering) {
   for (std::pair<unsigned, DenseSet<unsigned>> &P : Mapping2) {
     unsigned Source = P.first;
 
-    ASSERT_TRUE(Cand2.getCanonicalNum(Source).hasValue());
+    ASSERT_TRUE(Cand2.getCanonicalNum(Source).has_value());
     unsigned Canon = *Cand2.getCanonicalNum(Source);
-    ASSERT_TRUE(Cand1.fromCanonicalNum(Canon).hasValue());
+    ASSERT_TRUE(Cand1.fromCanonicalNum(Canon).has_value());
     unsigned Dest = *Cand1.fromCanonicalNum(Canon);
 
     DenseSet<unsigned>::iterator It = P.second.find(Dest);
@@ -2462,7 +2477,7 @@ TEST(IRSimilarityCandidate, SamePHIStructureInternal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   // Check to make sure that we have a long enough region.
-  ASSERT_EQ(InstrList.size(), static_cast<unsigned>(11));
+  ASSERT_EQ(InstrList.size(), static_cast<unsigned>(12));
   // Check that the instructions were added correctly to both vectors.
   ASSERT_TRUE(InstrList.size() == UnsignedVec.size());
 
@@ -2515,7 +2530,7 @@ TEST(IRSimilarityCandidate, DifferentPHIStructureInternal) {
   getVectors(*M, Mapper, InstrList, UnsignedVec);
 
   // Check to make sure that we have a long enough region.
-  ASSERT_EQ(InstrList.size(), static_cast<unsigned>(13));
+  ASSERT_EQ(InstrList.size(), static_cast<unsigned>(14));
   // Check that the instructions were added correctly to both vectors.
   ASSERT_TRUE(InstrList.size() == UnsignedVec.size());
 
@@ -2606,6 +2621,62 @@ TEST(IRSimilarityIdentifier, CommutativeSimilarity) {
       InstIdx += 3;
     }
   }
+}
+
+// This test ensures that when the first instruction in a sequence is
+// a commutative instruction with the same value (mcomm_inst_same_val), but the
+// corresponding instruction (comm_inst_diff_val) is not, we mark the regions
+// and not similar.
+TEST(IRSimilarityIdentifier, CommutativeSameValueFirstMisMatch) {
+  StringRef ModuleString = R"(
+                          define void @v_1_0(i64 %v_33) {
+                            entry:
+                              %comm_inst_same_val = mul i64 undef, undef
+                              %add = add i64 %comm_inst_same_val, %v_33
+                              %comm_inst_diff_val = mul i64 0, undef
+                              %mul.i = add i64 %comm_inst_diff_val, %comm_inst_diff_val
+                              unreachable
+                            })";
+  LLVMContext Context;
+  std::unique_ptr<Module> M = makeLLVMModule(Context, ModuleString);
+
+  std::vector<std::vector<IRSimilarityCandidate>> SimilarityCandidates;
+  getSimilarities(*M, SimilarityCandidates);
+
+  ASSERT_TRUE(SimilarityCandidates.size() == 0);
+}
+
+// This test makes sure that intrinsic functions that are marked commutative
+// are still treated as non-commutative since they are function calls.
+TEST(IRSimilarityIdentifier, IntrinsicCommutative) {
+  // If treated as commutative, we will fail to find a valid mapping, causing
+  // an assertion error.
+  StringRef ModuleString = R"(
+  define void @foo() {
+    entry:
+      %0 = call i16 @llvm.smul.fix.i16(i16 16384, i16 16384, i32 15)
+      store i16 %0, i16* undef, align 1
+      %1 = icmp eq i16 undef, 8192
+      call void @bar()
+      %2 = call i16 @llvm.smul.fix.i16(i16 -16384, i16 16384, i32 15)
+      store i16 %2, i16* undef, align 1
+      %3 = icmp eq i16 undef, -8192
+      call void @bar()
+      %4 = call i16 @llvm.smul.fix.i16(i16 -16384, i16 -16384, i32 15)
+      ret void
+  }
+
+  declare void @bar()
+
+  ; Function Attrs: nofree nosync nounwind readnone speculatable willreturn
+  declare i16 @llvm.smul.fix.i16(i16, i16, i32 immarg))";
+  LLVMContext Context;
+  std::unique_ptr<Module> M = makeLLVMModule(Context, ModuleString);
+
+  std::vector<std::vector<IRSimilarityCandidate>> SimilarityCandidates;
+  getSimilarities(*M, SimilarityCandidates);
+
+  ASSERT_TRUE(SimilarityCandidates.size() == 0);
 }
 
 // This test checks to see whether we can detect different structure in

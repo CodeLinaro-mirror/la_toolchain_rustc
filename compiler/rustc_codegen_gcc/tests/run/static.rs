@@ -9,7 +9,8 @@
 //      12
 //      1
 
-#![feature(auto_traits, lang_items, no_core, start, intrinsics)]
+#![feature(auto_traits, lang_items, no_core, start, intrinsics, rustc_attrs)]
+#![allow(internal_features)]
 
 #![no_std]
 #![no_core]
@@ -22,11 +23,18 @@
 #[lang = "sized"]
 pub trait Sized {}
 
+#[lang = "destruct"]
+pub trait Destruct {}
+
+#[lang = "drop"]
+pub trait Drop {}
+
 #[lang = "copy"]
 trait Copy {
 }
 
 impl Copy for isize {}
+impl<T: ?Sized> Copy for *mut T {}
 
 #[lang = "receiver"]
 trait Receiver {
@@ -39,6 +47,7 @@ mod intrinsics {
     use super::Sized;
 
     extern "rust-intrinsic" {
+        #[rustc_safe_intrinsic]
         pub fn abort() -> !;
     }
 }
@@ -52,9 +61,6 @@ mod libc {
 
 #[lang = "structural_peq"]
 pub trait StructuralPartialEq {}
-
-#[lang = "structural_teq"]
-pub trait StructuralEq {}
 
 #[lang = "drop_in_place"]
 #[allow(unconditional_recursion)]

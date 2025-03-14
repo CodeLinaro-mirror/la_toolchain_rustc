@@ -1,8 +1,11 @@
 #![deny(clippy::index_refutable_slice)]
 
+//@no-rustfix: need to change the suggestion to a multipart suggestion
+
 fn below_limit() {
     let slice: Option<&[u32]> = Some(&[1, 2, 3]);
     if let Some(slice) = slice {
+        //~^ ERROR: binding can be a slice pattern
         // This would usually not be linted but is included now due to the
         // index limit in the config file
         println!("{}", slice[7]);

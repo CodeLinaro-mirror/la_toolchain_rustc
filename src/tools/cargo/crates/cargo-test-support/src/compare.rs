@@ -1,6 +1,11 @@
 //! Routines for comparing and diffing output.
 //!
-//! # Patterns
+//! # Deprecated comparisons
+//!
+//! Cargo's tests are in transition from internal-only pattern and normalization routines used in
+//! asserts like [`crate::Execs::with_stdout_contains`] to [`assert_e2e`] and [`assert_ui`].
+//!
+//! ## Patterns
 //!
 //! Many of these functions support special markup to assist with comparing
 //! text that may vary or is otherwise uninteresting for the test at hand. The
@@ -16,8 +21,13 @@
 //!   `[WARNING]`) to match cargo's "status" output and allows you to ignore
 //!   the alignment. See the source of `substitute_macros` for a complete list
 //!   of substitutions.
+//! - `[DIRTY-MSVC]` (only when the line starts with it) would be replaced by
+//!   `[DIRTY]` when `cfg(target_env = "msvc")` or the line will be ignored otherwise.
+//!   Tests that work around [issue 7358](https://github.com/rust-lang/cargo/issues/7358)
+//!   can use this to avoid duplicating the `with_stderr` call like:
+//!   `if cfg!(target_env = "msvc") {e.with_stderr("...[DIRTY]...");} else {e.with_stderr("...");}`.
 //!
-//! # Normalization
+//! ## Normalization
 //!
 //! In addition to the patterns described above, the strings are normalized
 //! in such a way to avoid unwanted differences. The normalizations are:
@@ -31,15 +41,293 @@
 //!   a problem.
 //! - Carriage returns are removed, which can help when running on Windows.
 
-use crate::diff;
+use crate::cross_compile::try_alternate;
 use crate::paths;
-use anyhow::{bail, Context, Result};
-use serde_json::Value;
-use std::env;
+use crate::{diff, rustc_host};
+use anyhow::{bail, Result};
 use std::fmt;
 use std::path::Path;
 use std::str;
 use url::Url;
+
+/// This makes it easier to write regex replacements that are guaranteed to only
+/// get compiled once
+macro_rules! regex {
+    ($re:literal $(,)?) => {{
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        RE.get_or_init(|| regex::Regex::new($re).unwrap())
+    }};
+}
+
+/// Assertion policy for UI tests
+///
+/// This emphasizes showing as much content as possible at the cost of more brittleness
+///
+/// # Snapshots
+///
+/// Updating of snapshots is controlled with the `SNAPSHOTS` environment variable:
+///
+/// - `skip`: do not run the tests
+/// - `ignore`: run the tests but ignore their failure
+/// - `verify`: run the tests
+/// - `overwrite`: update the snapshots based on the output of the tests
+///
+/// # Patterns
+///
+/// - `[..]` is a character wildcard, stopping at line breaks
+/// - `\n...\n` is a multi-line wildcard
+/// - `[EXE]` matches the exe suffix for the current platform
+/// - `[ROOT]` matches [`paths::root()`][crate::paths::root]
+/// - `[ROOTURL]` matches [`paths::root()`][crate::paths::root] as a URL
+///
+/// # Normalization
+///
+/// In addition to the patterns described above, text is normalized
+/// in such a way to avoid unwanted differences. The normalizations are:
+///
+/// - Backslashes are converted to forward slashes to deal with Windows paths.
+///   This helps so that all tests can be written assuming forward slashes.
+///   Other heuristics are applied to try to ensure Windows-style paths aren't
+///   a problem.
+/// - Carriage returns are removed, which can help when running on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # use cargo_test_support::compare::assert_e2e;
+/// # use cargo_test_support::file;
+/// # let p = cargo_test_support::project().build();
+/// # let stdout = "";
+/// assert_e2e().eq(stdout, file!["stderr.term.svg"]);
+/// ```
+/// ```console
+/// $ SNAPSHOTS=overwrite cargo test
+/// ```
+pub fn assert_ui() -> snapbox::Assert {
+    let mut subs = snapbox::Redactions::new();
+    subs.extend(MIN_LITERAL_REDACTIONS.into_iter().cloned())
+        .unwrap();
+    add_test_support_redactions(&mut subs);
+    add_regex_redactions(&mut subs);
+
+    snapbox::Assert::new()
+        .action_env(snapbox::assert::DEFAULT_ACTION_ENV)
+        .redact_with(subs)
+}
+
+/// Assertion policy for functional end-to-end tests
+///
+/// This emphasizes showing as much content as possible at the cost of more brittleness
+///
+/// # Snapshots
+///
+/// Updating of snapshots is controlled with the `SNAPSHOTS` environment variable:
+///
+/// - `skip`: do not run the tests
+/// - `ignore`: run the tests but ignore their failure
+/// - `verify`: run the tests
+/// - `overwrite`: update the snapshots based on the output of the tests
+///
+/// # Patterns
+///
+/// - `[..]` is a character wildcard, stopping at line breaks
+/// - `\n...\n` is a multi-line wildcard
+/// - `[EXE]` matches the exe suffix for the current platform
+/// - `[ROOT]` matches [`paths::root()`][crate::paths::root]
+/// - `[ROOTURL]` matches [`paths::root()`][crate::paths::root] as a URL
+///
+/// # Normalization
+///
+/// In addition to the patterns described above, text is normalized
+/// in such a way to avoid unwanted differences. The normalizations are:
+///
+/// - Backslashes are converted to forward slashes to deal with Windows paths.
+///   This helps so that all tests can be written assuming forward slashes.
+///   Other heuristics are applied to try to ensure Windows-style paths aren't
+///   a problem.
+/// - Carriage returns are removed, which can help when running on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # use cargo_test_support::compare::assert_e2e;
+/// # use cargo_test_support::str;
+/// # let p = cargo_test_support::project().build();
+/// assert_e2e().eq(p.read_lockfile(), str![]);
+/// ```
+/// ```console
+/// $ SNAPSHOTS=overwrite cargo test
+/// ```
+pub fn assert_e2e() -> snapbox::Assert {
+    let mut subs = snapbox::Redactions::new();
+    subs.extend(MIN_LITERAL_REDACTIONS.into_iter().cloned())
+        .unwrap();
+    subs.extend(E2E_LITERAL_REDACTIONS.into_iter().cloned())
+        .unwrap();
+    add_test_support_redactions(&mut subs);
+    add_regex_redactions(&mut subs);
+
+    snapbox::Assert::new()
+        .action_env(snapbox::assert::DEFAULT_ACTION_ENV)
+        .redact_with(subs)
+}
+
+fn add_test_support_redactions(subs: &mut snapbox::Redactions) {
+    let root = paths::root();
+    // Use `from_file_path` instead of `from_dir_path` so the trailing slash is
+    // put in the users output, rather than hidden in the variable
+    let root_url = url::Url::from_file_path(&root).unwrap().to_string();
+
+    subs.insert("[ROOT]", root).unwrap();
+    subs.insert("[ROOTURL]", root_url).unwrap();
+    subs.insert("[HOST_TARGET]", rustc_host()).unwrap();
+    if let Some(alt_target) = try_alternate() {
+        subs.insert("[ALT_TARGET]", alt_target).unwrap();
+    }
+}
+
+fn add_regex_redactions(subs: &mut snapbox::Redactions) {
+    // For e2e tests
+    subs.insert(
+        "[ELAPSED]",
+        regex!(r"\[FINISHED\].*in (?<redacted>[0-9]+(\.[0-9]+)?(m [0-9]+)?)s"),
+    )
+    .unwrap();
+    // for UI tests
+    subs.insert(
+        "[ELAPSED]",
+        regex!(r"Finished.*in (?<redacted>[0-9]+(\.[0-9]+)?(m [0-9]+)?)s"),
+    )
+    .unwrap();
+    // output from libtest
+    subs.insert(
+        "[ELAPSED]",
+        regex!(r"; finished in (?<redacted>[0-9]+(\.[0-9]+)?(m [0-9]+)?)s"),
+    )
+    .unwrap();
+    subs.insert(
+        "[FILE_NUM]",
+        regex!(r"\[(REMOVED|SUMMARY)\] (?<redacted>[1-9][0-9]*) files"),
+    )
+    .unwrap();
+    subs.insert(
+        "[FILE_SIZE]",
+        regex!(r"(?<redacted>[0-9]+(\.[0-9]+)?([a-zA-Z]i)?)B\s"),
+    )
+    .unwrap();
+    subs.insert(
+        "[HASH]",
+        regex!(r"home/\.cargo/registry/(cache|index|src)/-(?<redacted>[a-z0-9]+)"),
+    )
+    .unwrap();
+    subs.insert(
+        "[HASH]",
+        regex!(r"\.cargo/target/(?<redacted>[0-9a-f]{2}/[0-9a-f]{14})"),
+    )
+    .unwrap();
+    subs.insert("[HASH]", regex!(r"/[a-z0-9\-_]+-(?<redacted>[0-9a-f]{16})"))
+        .unwrap();
+    subs.insert(
+        "[AVG_ELAPSED]",
+        regex!(r"(?<redacted>[0-9]+(\.[0-9]+)?) ns/iter"),
+    )
+    .unwrap();
+    subs.insert(
+        "[JITTER]",
+        regex!(r"ns/iter \(\+/- (?<redacted>[0-9]+(\.[0-9]+)?)\)"),
+    )
+    .unwrap();
+
+    // Following 3 subs redact:
+    //   "1719325877.527949100s, 61549498ns after last build at 1719325877.466399602s"
+    //   "1719503592.218193216s, 1h 1s after last build at 1719499991.982681034s"
+    // into "[DIRTY_REASON_NEW_TIME], [DIRTY_REASON_DIFF] after last build at [DIRTY_REASON_OLD_TIME]"
+    subs.insert(
+        "[TIME_DIFF_AFTER_LAST_BUILD]",
+        regex!(r"(?<redacted>[0-9]+(\.[0-9]+)?s, (\s?[0-9]+(\.[0-9]+)?(s|ns|h))+ after last build at [0-9]+(\.[0-9]+)?s)"),
+       )
+       .unwrap();
+}
+
+static MIN_LITERAL_REDACTIONS: &[(&str, &str)] = &[
+    ("[EXE]", std::env::consts::EXE_SUFFIX),
+    ("[BROKEN_PIPE]", "Broken pipe (os error 32)"),
+    ("[BROKEN_PIPE]", "The pipe is being closed. (os error 232)"),
+    // Unix message for an entity was not found
+    ("[NOT_FOUND]", "No such file or directory (os error 2)"),
+    // Windows message for an entity was not found
+    (
+        "[NOT_FOUND]",
+        "The system cannot find the file specified. (os error 2)",
+    ),
+    (
+        "[NOT_FOUND]",
+        "The system cannot find the path specified. (os error 3)",
+    ),
+    ("[NOT_FOUND]", "Access is denied. (os error 5)"),
+    ("[NOT_FOUND]", "program not found"),
+    // Unix message for exit status
+    ("[EXIT_STATUS]", "exit status"),
+    // Windows message for exit status
+    ("[EXIT_STATUS]", "exit code"),
+];
+static E2E_LITERAL_REDACTIONS: &[(&str, &str)] = &[
+    ("[RUNNING]", "     Running"),
+    ("[COMPILING]", "   Compiling"),
+    ("[CHECKING]", "    Checking"),
+    ("[COMPLETED]", "   Completed"),
+    ("[CREATED]", "     Created"),
+    ("[CREATING]", "    Creating"),
+    ("[CREDENTIAL]", "  Credential"),
+    ("[DOWNGRADING]", " Downgrading"),
+    ("[FINISHED]", "    Finished"),
+    ("[ERROR]", "error:"),
+    ("[WARNING]", "warning:"),
+    ("[NOTE]", "note:"),
+    ("[HELP]", "help:"),
+    ("[DOCUMENTING]", " Documenting"),
+    ("[SCRAPING]", "    Scraping"),
+    ("[FRESH]", "       Fresh"),
+    ("[DIRTY]", "       Dirty"),
+    ("[LOCKING]", "     Locking"),
+    ("[UPDATING]", "    Updating"),
+    ("[UPGRADING]", "   Upgrading"),
+    ("[ADDING]", "      Adding"),
+    ("[REMOVING]", "    Removing"),
+    ("[REMOVED]", "     Removed"),
+    ("[UNCHANGED]", "   Unchanged"),
+    ("[DOCTEST]", "   Doc-tests"),
+    ("[PACKAGING]", "   Packaging"),
+    ("[PACKAGED]", "    Packaged"),
+    ("[DOWNLOADING]", " Downloading"),
+    ("[DOWNLOADED]", "  Downloaded"),
+    ("[UPLOADING]", "   Uploading"),
+    ("[UPLOADED]", "    Uploaded"),
+    ("[VERIFYING]", "   Verifying"),
+    ("[ARCHIVING]", "   Archiving"),
+    ("[INSTALLING]", "  Installing"),
+    ("[REPLACING]", "   Replacing"),
+    ("[UNPACKING]", "   Unpacking"),
+    ("[SUMMARY]", "     Summary"),
+    ("[FIXED]", "       Fixed"),
+    ("[FIXING]", "      Fixing"),
+    ("[IGNORED]", "     Ignored"),
+    ("[INSTALLED]", "   Installed"),
+    ("[REPLACED]", "    Replaced"),
+    ("[BUILDING]", "    Building"),
+    ("[LOGIN]", "       Login"),
+    ("[LOGOUT]", "      Logout"),
+    ("[YANK]", "        Yank"),
+    ("[OWNER]", "       Owner"),
+    ("[MIGRATING]", "   Migrating"),
+    ("[EXECUTABLE]", "  Executable"),
+    ("[SKIPPING]", "    Skipping"),
+    ("[WAITING]", "     Waiting"),
+    ("[PUBLISHED]", "   Published"),
+    ("[BLOCKING]", "    Blocking"),
+    ("[GENERATED]", "   Generated"),
+    ("[OPENING]", "     Opening"),
+];
 
 /// Normalizes the output so that it can be compared against the expected value.
 fn normalize_actual(actual: &str, cwd: Option<&Path>) -> String {
@@ -57,7 +345,9 @@ fn normalize_actual(actual: &str, cwd: Option<&Path>) -> String {
 
 /// Normalizes the expected string so that it can be compared against the actual output.
 fn normalize_expected(expected: &str, cwd: Option<&Path>) -> String {
-    let expected = substitute_macros(expected);
+    let expected = replace_dirty_msvc(expected);
+    let expected = substitute_macros(&expected);
+
     if cfg!(windows) {
         normalize_windows(&expected, cwd)
     } else {
@@ -68,6 +358,29 @@ fn normalize_expected(expected: &str, cwd: Option<&Path>) -> String {
         let expected = expected.replace("[ROOT]", &paths::root().display().to_string());
         expected
     }
+}
+
+fn replace_dirty_msvc_impl(s: &str, is_msvc: bool) -> String {
+    if is_msvc {
+        s.replace("[DIRTY-MSVC]", "[DIRTY]")
+    } else {
+        use itertools::Itertools;
+
+        let mut new = s
+            .lines()
+            .filter(|it| !it.starts_with("[DIRTY-MSVC]"))
+            .join("\n");
+
+        if s.ends_with("\n") {
+            new.push_str("\n");
+        }
+
+        new
+    }
+}
+
+fn replace_dirty_msvc(s: &str) -> String {
+    replace_dirty_msvc_impl(s, cfg!(target_env = "msvc"))
 }
 
 /// Normalizes text for both actual and expected strings on Windows.
@@ -105,48 +418,11 @@ fn normalize_windows(text: &str, cwd: Option<&Path>) -> String {
 }
 
 fn substitute_macros(input: &str) -> String {
-    let macros = [
-        ("[RUNNING]", "     Running"),
-        ("[COMPILING]", "   Compiling"),
-        ("[CHECKING]", "    Checking"),
-        ("[COMPLETED]", "   Completed"),
-        ("[CREATED]", "     Created"),
-        ("[FINISHED]", "    Finished"),
-        ("[ERROR]", "error:"),
-        ("[WARNING]", "warning:"),
-        ("[NOTE]", "note:"),
-        ("[HELP]", "help:"),
-        ("[DOCUMENTING]", " Documenting"),
-        ("[FRESH]", "       Fresh"),
-        ("[UPDATING]", "    Updating"),
-        ("[ADDING]", "      Adding"),
-        ("[REMOVING]", "    Removing"),
-        ("[DOCTEST]", "   Doc-tests"),
-        ("[PACKAGING]", "   Packaging"),
-        ("[DOWNLOADING]", " Downloading"),
-        ("[DOWNLOADED]", "  Downloaded"),
-        ("[UPLOADING]", "   Uploading"),
-        ("[VERIFYING]", "   Verifying"),
-        ("[ARCHIVING]", "   Archiving"),
-        ("[INSTALLING]", "  Installing"),
-        ("[REPLACING]", "   Replacing"),
-        ("[UNPACKING]", "   Unpacking"),
-        ("[SUMMARY]", "     Summary"),
-        ("[FIXED]", "       Fixed"),
-        ("[FIXING]", "      Fixing"),
-        ("[EXE]", env::consts::EXE_SUFFIX),
-        ("[IGNORED]", "     Ignored"),
-        ("[INSTALLED]", "   Installed"),
-        ("[REPLACED]", "    Replaced"),
-        ("[BUILDING]", "    Building"),
-        ("[LOGIN]", "       Login"),
-        ("[LOGOUT]", "      Logout"),
-        ("[YANK]", "        Yank"),
-        ("[OWNER]", "       Owner"),
-        ("[MIGRATING]", "   Migrating"),
-    ];
     let mut result = input.to_owned();
-    for &(pat, subst) in &macros {
+    for &(pat, subst) in MIN_LITERAL_REDACTIONS {
+        result = result.replace(pat, subst)
+    }
+    for &(pat, subst) in E2E_LITERAL_REDACTIONS {
         result = result.replace(pat, subst)
     }
     result
@@ -158,7 +434,7 @@ fn substitute_macros(input: &str) -> String {
 ///
 /// - `description` explains where the output is from (usually "stdout" or "stderr").
 /// - `other_output` is other output to display in the error (usually stdout or stderr).
-pub fn match_exact(
+pub(crate) fn match_exact(
     expected: &str,
     actual: &str,
     description: &str,
@@ -186,7 +462,7 @@ pub fn match_exact(
 
 /// Convenience wrapper around [`match_exact`] which will panic on error.
 #[track_caller]
-pub fn assert_match_exact(expected: &str, actual: &str) {
+pub(crate) fn assert_match_exact(expected: &str, actual: &str) {
     if let Err(e) = match_exact(expected, actual, "", "", None) {
         crate::panic_error("", e);
     }
@@ -196,7 +472,7 @@ pub fn assert_match_exact(expected: &str, actual: &str) {
 /// of the lines.
 ///
 /// See [Patterns](index.html#patterns) for more information on pattern matching.
-pub fn match_unordered(expected: &str, actual: &str, cwd: Option<&Path>) -> Result<()> {
+pub(crate) fn match_unordered(expected: &str, actual: &str, cwd: Option<&Path>) -> Result<()> {
     let expected = normalize_expected(expected, cwd);
     let actual = normalize_actual(actual, cwd);
     let e: Vec<_> = expected.lines().map(|line| WildStr::new(line)).collect();
@@ -246,7 +522,7 @@ pub fn match_unordered(expected: &str, actual: &str, cwd: Option<&Path>) -> Resu
 /// somewhere.
 ///
 /// See [Patterns](index.html#patterns) for more information on pattern matching.
-pub fn match_contains(expected: &str, actual: &str, cwd: Option<&Path>) -> Result<()> {
+pub(crate) fn match_contains(expected: &str, actual: &str, cwd: Option<&Path>) -> Result<()> {
     let expected = normalize_expected(expected, cwd);
     let actual = normalize_actual(actual, cwd);
     let e: Vec<_> = expected.lines().map(|line| WildStr::new(line)).collect();
@@ -273,7 +549,11 @@ pub fn match_contains(expected: &str, actual: &str, cwd: Option<&Path>) -> Resul
 /// anywhere.
 ///
 /// See [Patterns](index.html#patterns) for more information on pattern matching.
-pub fn match_does_not_contain(expected: &str, actual: &str, cwd: Option<&Path>) -> Result<()> {
+pub(crate) fn match_does_not_contain(
+    expected: &str,
+    actual: &str,
+    cwd: Option<&Path>,
+) -> Result<()> {
     if match_contains(expected, actual, cwd).is_ok() {
         bail!(
             "expected not to find:\n\
@@ -292,7 +572,7 @@ pub fn match_does_not_contain(expected: &str, actual: &str, cwd: Option<&Path>) 
 /// somewhere, and should be repeated `number` times.
 ///
 /// See [Patterns](index.html#patterns) for more information on pattern matching.
-pub fn match_contains_n(
+pub(crate) fn match_contains_n(
     expected: &str,
     number: usize,
     actual: &str,
@@ -329,7 +609,7 @@ pub fn match_contains_n(
 ///
 /// See [`crate::Execs::with_stderr_line_without`] for an example and cautions
 /// against using.
-pub fn match_with_without(
+pub(crate) fn match_with_without(
     actual: &str,
     with: &[String],
     without: &[String],
@@ -373,148 +653,8 @@ pub fn match_with_without(
     }
 }
 
-/// Checks that the given string of JSON objects match the given set of
-/// expected JSON objects.
-///
-/// See [`crate::Execs::with_json`] for more details.
-pub fn match_json(expected: &str, actual: &str, cwd: Option<&Path>) -> Result<()> {
-    let (exp_objs, act_objs) = collect_json_objects(expected, actual)?;
-    if exp_objs.len() != act_objs.len() {
-        bail!(
-            "expected {} json lines, got {}, stdout:\n{}",
-            exp_objs.len(),
-            act_objs.len(),
-            actual
-        );
-    }
-    for (exp_obj, act_obj) in exp_objs.iter().zip(act_objs) {
-        find_json_mismatch(exp_obj, &act_obj, cwd)?;
-    }
-    Ok(())
-}
-
-/// Checks that the given string of JSON objects match the given set of
-/// expected JSON objects, ignoring their order.
-///
-/// See [`crate::Execs::with_json_contains_unordered`] for more details and
-/// cautions when using.
-pub fn match_json_contains_unordered(
-    expected: &str,
-    actual: &str,
-    cwd: Option<&Path>,
-) -> Result<()> {
-    let (exp_objs, mut act_objs) = collect_json_objects(expected, actual)?;
-    for exp_obj in exp_objs {
-        match act_objs
-            .iter()
-            .position(|act_obj| find_json_mismatch(&exp_obj, act_obj, cwd).is_ok())
-        {
-            Some(index) => act_objs.remove(index),
-            None => {
-                bail!(
-                    "Did not find expected JSON:\n\
-                     {}\n\
-                     Remaining available output:\n\
-                     {}\n",
-                    serde_json::to_string_pretty(&exp_obj).unwrap(),
-                    itertools::join(
-                        act_objs.iter().map(|o| serde_json::to_string(o).unwrap()),
-                        "\n"
-                    )
-                );
-            }
-        };
-    }
-    Ok(())
-}
-
-fn collect_json_objects(
-    expected: &str,
-    actual: &str,
-) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
-    let expected_objs: Vec<_> = expected
-        .split("\n\n")
-        .map(|expect| {
-            expect
-                .parse()
-                .with_context(|| format!("failed to parse expected JSON object:\n{}", expect))
-        })
-        .collect::<Result<_>>()?;
-    let actual_objs: Vec<_> = actual
-        .lines()
-        .filter(|line| line.starts_with('{'))
-        .map(|line| {
-            line.parse()
-                .with_context(|| format!("failed to parse JSON object:\n{}", line))
-        })
-        .collect::<Result<_>>()?;
-    Ok((expected_objs, actual_objs))
-}
-
-/// Compares JSON object for approximate equality.
-/// You can use `[..]` wildcard in strings (useful for OS-dependent things such
-/// as paths). You can use a `"{...}"` string literal as a wildcard for
-/// arbitrary nested JSON (useful for parts of object emitted by other programs
-/// (e.g., rustc) rather than Cargo itself).
-pub fn find_json_mismatch(expected: &Value, actual: &Value, cwd: Option<&Path>) -> Result<()> {
-    match find_json_mismatch_r(expected, actual, cwd) {
-        Some((expected_part, actual_part)) => bail!(
-            "JSON mismatch\nExpected:\n{}\nWas:\n{}\nExpected part:\n{}\nActual part:\n{}\n",
-            serde_json::to_string_pretty(expected).unwrap(),
-            serde_json::to_string_pretty(&actual).unwrap(),
-            serde_json::to_string_pretty(expected_part).unwrap(),
-            serde_json::to_string_pretty(actual_part).unwrap(),
-        ),
-        None => Ok(()),
-    }
-}
-
-fn find_json_mismatch_r<'a>(
-    expected: &'a Value,
-    actual: &'a Value,
-    cwd: Option<&Path>,
-) -> Option<(&'a Value, &'a Value)> {
-    use serde_json::Value::*;
-    match (expected, actual) {
-        (&Number(ref l), &Number(ref r)) if l == r => None,
-        (&Bool(l), &Bool(r)) if l == r => None,
-        (&String(ref l), _) if l == "{...}" => None,
-        (&String(ref l), &String(ref r)) => {
-            if match_exact(l, r, "", "", cwd).is_err() {
-                Some((expected, actual))
-            } else {
-                None
-            }
-        }
-        (&Array(ref l), &Array(ref r)) => {
-            if l.len() != r.len() {
-                return Some((expected, actual));
-            }
-
-            l.iter()
-                .zip(r.iter())
-                .filter_map(|(l, r)| find_json_mismatch_r(l, r, cwd))
-                .next()
-        }
-        (&Object(ref l), &Object(ref r)) => {
-            let same_keys = l.len() == r.len() && l.keys().all(|k| r.contains_key(k));
-            if !same_keys {
-                return Some((expected, actual));
-            }
-
-            l.values()
-                .zip(r.values())
-                .filter_map(|(l, r)| find_json_mismatch_r(l, r, cwd))
-                .next()
-        }
-        (&Null, &Null) => None,
-        // Magic string literal `"{...}"` acts as wildcard for any sub-JSON.
-        _ => Some((expected, actual)),
-    }
-}
-
 /// A single line string that supports `[..]` wildcard matching.
-pub struct WildStr<'a> {
+pub(crate) struct WildStr<'a> {
     has_meta: bool,
     line: &'a str,
 }
@@ -566,18 +706,153 @@ impl fmt::Debug for WildStr<'_> {
     }
 }
 
-#[test]
-fn wild_str_cmp() {
-    for (a, b) in &[
-        ("a b", "a b"),
-        ("a[..]b", "a b"),
-        ("a[..]", "a b"),
-        ("[..]", "a b"),
-        ("[..]b", "a b"),
-    ] {
-        assert_eq!(WildStr::new(a), WildStr::new(b));
+#[cfg(test)]
+mod test {
+    use snapbox::assert_data_eq;
+    use snapbox::prelude::*;
+    use snapbox::str;
+
+    use super::*;
+
+    #[test]
+    fn wild_str_cmp() {
+        for (a, b) in &[
+            ("a b", "a b"),
+            ("a[..]b", "a b"),
+            ("a[..]", "a b"),
+            ("[..]", "a b"),
+            ("[..]b", "a b"),
+        ] {
+            assert_eq!(WildStr::new(a), WildStr::new(b));
+        }
+        for (a, b) in &[("[..]b", "c"), ("b", "c"), ("b", "cb")] {
+            assert_ne!(WildStr::new(a), WildStr::new(b));
+        }
     }
-    for (a, b) in &[("[..]b", "c"), ("b", "c"), ("b", "cb")] {
-        assert_ne!(WildStr::new(a), WildStr::new(b));
+
+    #[test]
+    fn dirty_msvc() {
+        let case = |expected: &str, wild: &str, msvc: bool| {
+            assert_eq!(expected, &replace_dirty_msvc_impl(wild, msvc));
+        };
+
+        // no replacements
+        case("aa", "aa", false);
+        case("aa", "aa", true);
+
+        // with replacements
+        case(
+            "\
+[DIRTY] a",
+            "\
+[DIRTY-MSVC] a",
+            true,
+        );
+        case(
+            "",
+            "\
+[DIRTY-MSVC] a",
+            false,
+        );
+        case(
+            "\
+[DIRTY] a
+[COMPILING] a",
+            "\
+[DIRTY-MSVC] a
+[COMPILING] a",
+            true,
+        );
+        case(
+            "\
+[COMPILING] a",
+            "\
+[DIRTY-MSVC] a
+[COMPILING] a",
+            false,
+        );
+
+        // test trailing newline behavior
+        case(
+            "\
+A
+B
+", "\
+A
+B
+", true,
+        );
+
+        case(
+            "\
+A
+B
+", "\
+A
+B
+", false,
+        );
+
+        case(
+            "\
+A
+B", "\
+A
+B", true,
+        );
+
+        case(
+            "\
+A
+B", "\
+A
+B", false,
+        );
+
+        case(
+            "\
+[DIRTY] a
+",
+            "\
+[DIRTY-MSVC] a
+",
+            true,
+        );
+        case(
+            "\n",
+            "\
+[DIRTY-MSVC] a
+",
+            false,
+        );
+
+        case(
+            "\
+[DIRTY] a",
+            "\
+[DIRTY-MSVC] a",
+            true,
+        );
+        case(
+            "",
+            "\
+[DIRTY-MSVC] a",
+            false,
+        );
+    }
+
+    #[test]
+    fn redact_elapsed_time() {
+        let mut subs = snapbox::Redactions::new();
+        add_regex_redactions(&mut subs);
+
+        assert_data_eq!(
+            subs.redact("[FINISHED] `release` profile [optimized] target(s) in 5.5s"),
+            str!["[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s"].raw()
+        );
+        assert_data_eq!(
+            subs.redact("[FINISHED] `release` profile [optimized] target(s) in 1m 05s"),
+            str!["[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s"].raw()
+        );
     }
 }

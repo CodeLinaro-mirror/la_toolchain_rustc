@@ -1,17 +1,27 @@
 //! Diagnostics related methods for `Ty`.
 
-use crate::ty::subst::{GenericArg, GenericArgKind};
-use crate::ty::TyKind::*;
+use std::borrow::Cow;
+use std::fmt::Write;
+use std::ops::ControlFlow;
+
+use rustc_data_structures::fx::FxHashMap;
+use rustc_errors::{Applicability, Diag, DiagArgValue, IntoDiagArg, into_diag_arg_using_display};
+use rustc_hir::def::DefKind;
+use rustc_hir::def_id::DefId;
+use rustc_hir::{self as hir, LangItem, PredicateOrigin, WherePredicate};
+use rustc_span::{BytePos, Span};
+use rustc_type_ir::TyKind::*;
+
 use crate::ty::{
-    ConstKind, ExistentialPredicate, ExistentialProjection, ExistentialTraitRef, InferTy,
-    ProjectionTy, Term, Ty, TyCtxt, TypeAndMut,
+    self, AliasTy, Const, ConstKind, FallibleTypeFolder, InferConst, InferTy, Opaque,
+    PolyTraitPredicate, Projection, Ty, TyCtxt, TypeFoldable, TypeSuperFoldable,
+    TypeSuperVisitable, TypeVisitable, TypeVisitor,
 };
 
-use rustc_errors::{Applicability, DiagnosticBuilder};
-use rustc_hir as hir;
-use rustc_hir::def_id::DefId;
-use rustc_hir::{QPath, TyKind, WhereBoundPredicate, WherePredicate};
-use rustc_span::Span;
+into_diag_arg_using_display! {
+    Ty<'_>,
+    ty::Region<'_>,
+}
 
 impl<'tcx> Ty<'tcx> {
     /// Similar to `Ty::is_primitive`, but also considers inferred numeric values to be primitive.
@@ -58,315 +68,286 @@ impl<'tcx> Ty<'tcx> {
     /// description in error messages. This is used in the primary span label. Beyond what
     /// `is_simple_ty` includes, it also accepts ADTs with no type arguments and references to
     /// ADTs with no type arguments.
-    pub fn is_simple_text(self) -> bool {
+    pub fn is_simple_text(self, tcx: TyCtxt<'tcx>) -> bool {
         match self.kind() {
-            Adt(_, substs) => substs.non_erasable_generics().next().is_none(),
-            Ref(_, ty, _) => ty.is_simple_text(),
+            Adt(def, args) => args.non_erasable_generics(tcx, def.did()).next().is_none(),
+            Ref(_, ty, _) => ty.is_simple_text(tcx),
             _ => self.is_simple_ty(),
-        }
-    }
-
-    /// Whether the type can be safely suggested during error recovery.
-    pub fn is_suggestable(self) -> bool {
-        fn generic_arg_is_suggestible(arg: GenericArg<'_>) -> bool {
-            match arg.unpack() {
-                GenericArgKind::Type(ty) => ty.is_suggestable(),
-                GenericArgKind::Const(c) => const_is_suggestable(c.val()),
-                _ => true,
-            }
-        }
-
-        fn const_is_suggestable(kind: ConstKind<'_>) -> bool {
-            match kind {
-                ConstKind::Infer(..)
-                | ConstKind::Bound(..)
-                | ConstKind::Placeholder(..)
-                | ConstKind::Error(..) => false,
-                _ => true,
-            }
-        }
-
-        // FIXME(compiler-errors): Some types are still not good to suggest,
-        // specifically references with lifetimes within the function. Not
-        //sure we have enough information to resolve whether a region is
-        // temporary, so I'll leave this as a fixme.
-
-        match self.kind() {
-            Opaque(..)
-            | FnDef(..)
-            | Closure(..)
-            | Infer(..)
-            | Generator(..)
-            | GeneratorWitness(..)
-            | Bound(_, _)
-            | Placeholder(_)
-            | Error(_) => false,
-            Dynamic(dty, _) => dty.iter().all(|pred| match pred.skip_binder() {
-                ExistentialPredicate::Trait(ExistentialTraitRef { substs, .. }) => {
-                    substs.iter().all(generic_arg_is_suggestible)
-                }
-                ExistentialPredicate::Projection(ExistentialProjection {
-                    substs, term, ..
-                }) => {
-                    let term_is_suggestable = match term {
-                        Term::Ty(ty) => ty.is_suggestable(),
-                        Term::Const(c) => const_is_suggestable(c.val()),
-                    };
-                    term_is_suggestable && substs.iter().all(generic_arg_is_suggestible)
-                }
-                _ => true,
-            }),
-            Projection(ProjectionTy { substs: args, .. }) | Adt(_, args) | Tuple(args) => {
-                args.iter().all(generic_arg_is_suggestible)
-            }
-            Slice(ty) | RawPtr(TypeAndMut { ty, .. }) | Ref(_, ty, _) => ty.is_suggestable(),
-            Array(ty, c) => ty.is_suggestable() && const_is_suggestable(c.val()),
-            _ => true,
         }
     }
 }
 
-pub fn suggest_arbitrary_trait_bound(
-    generics: &hir::Generics<'_>,
-    err: &mut DiagnosticBuilder<'_>,
-    param_name: &str,
-    constraint: &str,
-) -> bool {
-    let param = generics.params.iter().find(|p| p.name.ident().as_str() == param_name);
-    match (param, param_name) {
-        (Some(_), "Self") => return false,
-        _ => {}
+pub trait IsSuggestable<'tcx>: Sized {
+    /// Whether this makes sense to suggest in a diagnostic.
+    ///
+    /// We filter out certain types and constants since they don't provide
+    /// meaningful rendered suggestions when pretty-printed. We leave some
+    /// nonsense, such as region vars, since those render as `'_` and are
+    /// usually okay to reinterpret as elided lifetimes.
+    ///
+    /// Only if `infer_suggestable` is true, we consider type and const
+    /// inference variables to be suggestable.
+    fn is_suggestable(self, tcx: TyCtxt<'tcx>, infer_suggestable: bool) -> bool;
+
+    fn make_suggestable(
+        self,
+        tcx: TyCtxt<'tcx>,
+        infer_suggestable: bool,
+        placeholder: Option<Ty<'tcx>>,
+    ) -> Option<Self>;
+}
+
+impl<'tcx, T> IsSuggestable<'tcx> for T
+where
+    T: TypeVisitable<TyCtxt<'tcx>> + TypeFoldable<TyCtxt<'tcx>>,
+{
+    #[tracing::instrument(level = "debug", skip(tcx))]
+    fn is_suggestable(self, tcx: TyCtxt<'tcx>, infer_suggestable: bool) -> bool {
+        self.visit_with(&mut IsSuggestableVisitor { tcx, infer_suggestable }).is_continue()
     }
-    // Suggest a where clause bound for a non-type paremeter.
-    let (action, prefix) = if generics.where_clause.predicates.is_empty() {
-        ("introducing a", " where ")
-    } else {
-        ("extending the", ", ")
-    };
+
+    fn make_suggestable(
+        self,
+        tcx: TyCtxt<'tcx>,
+        infer_suggestable: bool,
+        placeholder: Option<Ty<'tcx>>,
+    ) -> Option<T> {
+        self.try_fold_with(&mut MakeSuggestableFolder { tcx, infer_suggestable, placeholder }).ok()
+    }
+}
+
+pub fn suggest_arbitrary_trait_bound<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    generics: &hir::Generics<'_>,
+    err: &mut Diag<'_>,
+    trait_pred: PolyTraitPredicate<'tcx>,
+    associated_ty: Option<(&'static str, Ty<'tcx>)>,
+) -> bool {
+    if !trait_pred.is_suggestable(tcx, false) {
+        return false;
+    }
+
+    let param_name = trait_pred.skip_binder().self_ty().to_string();
+    let mut constraint = trait_pred.to_string();
+
+    if let Some((name, term)) = associated_ty {
+        // FIXME: this case overlaps with code in TyCtxt::note_and_explain_type_err.
+        // That should be extracted into a helper function.
+        if constraint.ends_with('>') {
+            constraint = format!("{}, {} = {}>", &constraint[..constraint.len() - 1], name, term);
+        } else {
+            constraint.push_str(&format!("<{name} = {term}>"));
+        }
+    }
+
+    let param = generics.params.iter().find(|p| p.name.ident().as_str() == param_name);
+
+    // Skip, there is a param named Self
+    if param.is_some() && param_name == "Self" {
+        return false;
+    }
+
+    // Suggest a where clause bound for a non-type parameter.
     err.span_suggestion_verbose(
-        generics.where_clause.tail_span_for_suggestion(),
-        &format!(
-            "consider {} `where` bound, but there might be an alternative better way to express \
+        generics.tail_span_for_predicate_suggestion(),
+        format!(
+            "consider {} `where` clause, but there might be an alternative better way to express \
              this requirement",
-            action,
+            if generics.where_clause_span.is_empty() { "introducing a" } else { "extending the" },
         ),
-        format!("{}{}: {}", prefix, param_name, constraint),
+        format!("{} {constraint}", generics.add_where_or_trailing_comma()),
         Applicability::MaybeIncorrect,
     );
     true
 }
 
-fn suggest_removing_unsized_bound(
+#[derive(Debug)]
+enum SuggestChangingConstraintsMessage<'a> {
+    RestrictBoundFurther,
+    RestrictType { ty: &'a str },
+    RestrictTypeFurther { ty: &'a str },
+    RemoveMaybeUnsized,
+    ReplaceMaybeUnsizedWithSized,
+}
+
+fn suggest_changing_unsized_bound(
     generics: &hir::Generics<'_>,
-    err: &mut DiagnosticBuilder<'_>,
-    param_name: &str,
+    suggestions: &mut Vec<(Span, String, SuggestChangingConstraintsMessage<'_>)>,
     param: &hir::GenericParam<'_>,
     def_id: Option<DefId>,
 ) {
     // See if there's a `?Sized` bound that can be removed to suggest that.
     // First look at the `where` clause because we can have `where T: ?Sized`,
     // then look at params.
-    for (where_pos, predicate) in generics.where_clause.predicates.iter().enumerate() {
-        match predicate {
-            WherePredicate::BoundPredicate(WhereBoundPredicate {
-                bounded_ty:
-                    hir::Ty {
-                        kind:
-                            hir::TyKind::Path(hir::QPath::Resolved(
-                                None,
-                                hir::Path {
-                                    segments: [segment],
-                                    res: hir::def::Res::Def(hir::def::DefKind::TyParam, _),
-                                    ..
-                                },
-                            )),
-                        ..
-                    },
-                bounds,
-                span,
-                ..
-            }) if segment.ident.as_str() == param_name => {
-                for (pos, bound) in bounds.iter().enumerate() {
-                    match bound {
-                        hir::GenericBound::Trait(poly, hir::TraitBoundModifier::Maybe)
-                            if poly.trait_ref.trait_def_id() == def_id => {}
-                        _ => continue,
-                    }
-                    let sp = match (
-                        bounds.len(),
-                        pos,
-                        generics.where_clause.predicates.len(),
-                        where_pos,
-                    ) {
-                        // where T: ?Sized
-                        // ^^^^^^^^^^^^^^^
-                        (1, _, 1, _) => generics.where_clause.span,
-                        // where Foo: Bar, T: ?Sized,
-                        //               ^^^^^^^^^^^
-                        (1, _, len, pos) if pos == len - 1 => generics.where_clause.predicates
-                            [pos - 1]
-                            .span()
-                            .shrink_to_hi()
-                            .to(*span),
-                        // where T: ?Sized, Foo: Bar,
-                        //       ^^^^^^^^^^^
-                        (1, _, _, pos) => {
-                            span.until(generics.where_clause.predicates[pos + 1].span())
-                        }
-                        // where T: ?Sized + Bar, Foo: Bar,
-                        //          ^^^^^^^^^
-                        (_, 0, _, _) => bound.span().to(bounds[1].span().shrink_to_lo()),
-                        // where T: Bar + ?Sized, Foo: Bar,
-                        //             ^^^^^^^^^
-                        (_, pos, _, _) => bounds[pos - 1].span().shrink_to_hi().to(bound.span()),
-                    };
-                    err.span_suggestion_verbose(
-                        sp,
-                        "consider removing the `?Sized` bound to make the \
-                            type parameter `Sized`",
-                        String::new(),
-                        Applicability::MaybeIncorrect,
-                    );
+    for (where_pos, predicate) in generics.predicates.iter().enumerate() {
+        let WherePredicate::BoundPredicate(predicate) = predicate else {
+            continue;
+        };
+        if !predicate.is_param_bound(param.def_id.to_def_id()) {
+            continue;
+        };
+
+        let unsized_bounds = predicate
+            .bounds
+            .iter()
+            .enumerate()
+            .filter(|(_, bound)| {
+                if let hir::GenericBound::Trait(poly, hir::TraitBoundModifier::Maybe) = bound
+                    && poly.trait_ref.trait_def_id() == def_id
+                {
+                    true
+                } else {
+                    false
                 }
-            }
-            _ => {}
+            })
+            .collect::<Vec<_>>();
+
+        if unsized_bounds.is_empty() {
+            continue;
         }
-    }
-    for (pos, bound) in param.bounds.iter().enumerate() {
-        match bound {
-            hir::GenericBound::Trait(poly, hir::TraitBoundModifier::Maybe)
-                if poly.trait_ref.trait_def_id() == def_id =>
-            {
-                let sp = match (param.bounds.len(), pos) {
-                    // T: ?Sized,
-                    //  ^^^^^^^^
-                    (1, _) => param.span.shrink_to_hi().to(bound.span()),
-                    // T: ?Sized + Bar,
-                    //    ^^^^^^^^^
-                    (_, 0) => bound.span().to(param.bounds[1].span().shrink_to_lo()),
-                    // T: Bar + ?Sized,
-                    //       ^^^^^^^^^
-                    (_, pos) => param.bounds[pos - 1].span().shrink_to_hi().to(bound.span()),
-                };
-                err.span_suggestion_verbose(
-                    sp,
-                    "consider removing the `?Sized` bound to make the type parameter \
-                        `Sized`",
-                    String::new(),
-                    Applicability::MaybeIncorrect,
-                );
+
+        let mut push_suggestion = |sp, msg| suggestions.push((sp, String::new(), msg));
+
+        if predicate.bounds.len() == unsized_bounds.len() {
+            // All the bounds are unsized bounds, e.g.
+            // `T: ?Sized + ?Sized` or `_: impl ?Sized + ?Sized`,
+            // so in this case:
+            // - if it's an impl trait predicate suggest changing the
+            //   the first bound to sized and removing the rest
+            // - Otherwise simply suggest removing the entire predicate
+            if predicate.origin == PredicateOrigin::ImplTrait {
+                let first_bound = unsized_bounds[0].1;
+                let first_bound_span = first_bound.span();
+                if first_bound_span.can_be_used_for_suggestions() {
+                    let question_span =
+                        first_bound_span.with_hi(first_bound_span.lo() + BytePos(1));
+                    push_suggestion(
+                        question_span,
+                        SuggestChangingConstraintsMessage::ReplaceMaybeUnsizedWithSized,
+                    );
+
+                    for (pos, _) in unsized_bounds.iter().skip(1) {
+                        let sp = generics.span_for_bound_removal(where_pos, *pos);
+                        push_suggestion(sp, SuggestChangingConstraintsMessage::RemoveMaybeUnsized);
+                    }
+                }
+            } else {
+                let sp = generics.span_for_predicate_removal(where_pos);
+                push_suggestion(sp, SuggestChangingConstraintsMessage::RemoveMaybeUnsized);
             }
-            _ => {}
+        } else {
+            // Some of the bounds are other than unsized.
+            // So push separate removal suggestion for each unsized bound
+            for (pos, _) in unsized_bounds {
+                let sp = generics.span_for_bound_removal(where_pos, pos);
+                push_suggestion(sp, SuggestChangingConstraintsMessage::RemoveMaybeUnsized);
+            }
         }
     }
 }
 
 /// Suggest restricting a type param with a new bound.
+///
+/// If `span_to_replace` is provided, then that span will be replaced with the
+/// `constraint`. If one wasn't provided, then the full bound will be suggested.
 pub fn suggest_constraining_type_param(
     tcx: TyCtxt<'_>,
     generics: &hir::Generics<'_>,
-    err: &mut DiagnosticBuilder<'_>,
+    err: &mut Diag<'_>,
     param_name: &str,
     constraint: &str,
     def_id: Option<DefId>,
+    span_to_replace: Option<Span>,
 ) -> bool {
-    let param = generics.params.iter().find(|p| p.name.ident().as_str() == param_name);
+    suggest_constraining_type_params(
+        tcx,
+        generics,
+        err,
+        [(param_name, constraint, def_id)].into_iter(),
+        span_to_replace,
+    )
+}
 
-    let Some(param) = param else {
-        return false;
-    };
+/// Suggest restricting a type param with a new bound.
+pub fn suggest_constraining_type_params<'a>(
+    tcx: TyCtxt<'_>,
+    generics: &hir::Generics<'_>,
+    err: &mut Diag<'_>,
+    param_names_and_constraints: impl Iterator<Item = (&'a str, &'a str, Option<DefId>)>,
+    span_to_replace: Option<Span>,
+) -> bool {
+    let mut grouped = FxHashMap::default();
+    param_names_and_constraints.for_each(|(param_name, constraint, def_id)| {
+        grouped.entry(param_name).or_insert(Vec::new()).push((constraint, def_id))
+    });
 
-    const MSG_RESTRICT_BOUND_FURTHER: &str = "consider further restricting this bound";
-    let msg_restrict_type = format!("consider restricting type parameter `{}`", param_name);
-    let msg_restrict_type_further =
-        format!("consider further restricting type parameter `{}`", param_name);
+    let mut applicability = Applicability::MachineApplicable;
+    let mut suggestions = Vec::new();
 
-    if def_id == tcx.lang_items().sized_trait() {
-        // Type parameters are already `Sized` by default.
-        err.span_label(param.span, &format!("this type parameter needs to be `{}`", constraint));
-        suggest_removing_unsized_bound(generics, err, param_name, param, def_id);
-        return true;
-    }
-    let mut suggest_restrict = |span| {
-        err.span_suggestion_verbose(
-            span,
-            MSG_RESTRICT_BOUND_FURTHER,
-            format!(" + {}", constraint),
-            Applicability::MachineApplicable,
-        );
-    };
+    for (param_name, mut constraints) in grouped {
+        let param = generics.params.iter().find(|p| p.name.ident().as_str() == param_name);
+        let Some(param) = param else { return false };
 
-    if param_name.starts_with("impl ") {
-        // If there's an `impl Trait` used in argument position, suggest
-        // restricting it:
-        //
-        //   fn foo(t: impl Foo) { ... }
-        //             --------
-        //             |
-        //             help: consider further restricting this bound with `+ Bar`
-        //
-        // Suggestion for tools in this case is:
-        //
-        //   fn foo(t: impl Foo) { ... }
-        //             --------
-        //             |
-        //             replace with: `impl Foo + Bar`
+        {
+            let mut sized_constraints = constraints.extract_if(|(_, def_id)| {
+                def_id.is_some_and(|def_id| tcx.is_lang_item(def_id, LangItem::Sized))
+            });
+            if let Some((_, def_id)) = sized_constraints.next() {
+                applicability = Applicability::MaybeIncorrect;
 
-        suggest_restrict(param.span.shrink_to_hi());
-        return true;
-    }
-
-    if generics.where_clause.predicates.is_empty()
-        // Given `trait Base<T = String>: Super<T>` where `T: Copy`, suggest restricting in the
-        // `where` clause instead of `trait Base<T: Copy = String>: Super<T>`.
-        && !matches!(param.kind, hir::GenericParamKind::Type { default: Some(_), .. })
-    {
-        if let Some(span) = param.bounds_span_for_suggestions() {
-            // If user has provided some bounds, suggest restricting them:
-            //
-            //   fn foo<T: Foo>(t: T) { ... }
-            //             ---
-            //             |
-            //             help: consider further restricting this bound with `+ Bar`
-            //
-            // Suggestion for tools in this case is:
-            //
-            //   fn foo<T: Foo>(t: T) { ... }
-            //          --
-            //          |
-            //          replace with: `T: Bar +`
-            suggest_restrict(span);
-        } else {
-            // If user hasn't provided any bounds, suggest adding a new one:
-            //
-            //   fn foo<T>(t: T) { ... }
-            //          - help: consider restricting this type parameter with `T: Foo`
-            err.span_suggestion_verbose(
-                param.span.shrink_to_hi(),
-                &msg_restrict_type,
-                format!(": {}", constraint),
-                Applicability::MachineApplicable,
-            );
+                err.span_label(param.span, "this type parameter needs to be `Sized`");
+                suggest_changing_unsized_bound(generics, &mut suggestions, param, def_id);
+            }
         }
 
-        true
-    } else {
-        // This part is a bit tricky, because using the `where` clause user can
-        // provide zero, one or many bounds for the same type parameter, so we
-        // have following cases to consider:
-        //
-        // 1) When the type parameter has been provided zero bounds
-        //
-        //    Message:
-        //      fn foo<X, Y>(x: X, y: Y) where Y: Foo { ... }
-        //             - help: consider restricting this type parameter with `where X: Bar`
-        //
-        //    Suggestion:
-        //      fn foo<X, Y>(x: X, y: Y) where Y: Foo { ... }
-        //                                           - insert: `, X: Bar`
-        //
-        //
-        // 2) When the type parameter has been provided one bound
+        // in the scenario like impl has stricter requirements than trait,
+        // we should not suggest restrict bound on the impl, here we double check
+        // the whether the param already has the constraint by checking `def_id`
+        let bound_trait_defs: Vec<DefId> = generics
+            .bounds_for_param(param.def_id)
+            .flat_map(|bound| {
+                bound.bounds.iter().flat_map(|b| b.trait_ref().and_then(|t| t.trait_def_id()))
+            })
+            .collect();
+
+        constraints
+            .retain(|(_, def_id)| def_id.map_or(true, |def| !bound_trait_defs.contains(&def)));
+
+        if constraints.is_empty() {
+            continue;
+        }
+
+        let mut constraint = constraints.iter().map(|&(c, _)| c).collect::<Vec<_>>();
+        constraint.sort();
+        constraint.dedup();
+        let constraint = constraint.join(" + ");
+        let mut suggest_restrict = |span, bound_list_non_empty, open_paren_sp| {
+            let suggestion = if span_to_replace.is_some() {
+                constraint.clone()
+            } else if constraint.starts_with('<') {
+                constraint.clone()
+            } else if bound_list_non_empty {
+                format!(" + {constraint}")
+            } else {
+                format!(" {constraint}")
+            };
+
+            use SuggestChangingConstraintsMessage::RestrictBoundFurther;
+
+            if let Some(open_paren_sp) = open_paren_sp {
+                suggestions.push((open_paren_sp, "(".to_string(), RestrictBoundFurther));
+                suggestions.push((span, format!("){suggestion}"), RestrictBoundFurther));
+            } else {
+                suggestions.push((span, suggestion, RestrictBoundFurther));
+            }
+        };
+
+        if let Some(span) = span_to_replace {
+            suggest_restrict(span, true, None);
+            continue;
+        }
+
+        // When the type parameter has been provided bounds
         //
         //    Message:
         //      fn foo<T>(t: T) where T: Foo { ... }
@@ -376,78 +357,140 @@ pub fn suggest_constraining_type_param(
         //
         //    Suggestion:
         //      fn foo<T>(t: T) where T: Foo { ... }
-        //                            ^^
-        //                            |
-        //                            replace with: `T: Bar +`
+        //                                  ^
+        //                                  |
+        //                                  replace with: ` + Bar`
         //
+        // Or, if user has provided some bounds, suggest restricting them:
         //
-        // 3) When the type parameter has been provided many bounds
+        //   fn foo<T: Foo>(t: T) { ... }
+        //             ---
+        //             |
+        //             help: consider further restricting this bound with `+ Bar`
         //
-        //    Message:
-        //      fn foo<T>(t: T) where T: Foo, T: Bar {... }
-        //             - help: consider further restricting this type parameter with `where T: Zar`
+        // Suggestion for tools in this case is:
         //
-        //    Suggestion:
-        //      fn foo<T>(t: T) where T: Foo, T: Bar {... }
-        //                                          - insert: `, T: Zar`
-        //
-        // Additionally, there may be no `where` clause whatsoever in the case that this was
-        // reached because the generic parameter has a default:
+        //   fn foo<T: Foo>(t: T) { ... }
+        //          --
+        //          |
+        //          replace with: `T: Bar +`
+
+        if let Some((span, open_paren_sp)) = generics.bounds_span_for_suggestions(param.def_id) {
+            suggest_restrict(span, true, open_paren_sp);
+            continue;
+        }
+
+        if generics.has_where_clause_predicates {
+            // This part is a bit tricky, because using the `where` clause user can
+            // provide zero, one or many bounds for the same type parameter, so we
+            // have following cases to consider:
+            //
+            // When the type parameter has been provided zero bounds
+            //
+            //    Message:
+            //      fn foo<X, Y>(x: X, y: Y) where Y: Foo { ... }
+            //             - help: consider restricting this type parameter with `where X: Bar`
+            //
+            //    Suggestion:
+            //      fn foo<X, Y>(x: X, y: Y) where Y: Foo { ... }
+            //                                           - insert: `, X: Bar`
+            suggestions.push((
+                generics.tail_span_for_predicate_suggestion(),
+                constraints.iter().fold(String::new(), |mut string, &(constraint, _)| {
+                    write!(string, ", {param_name}: {constraint}").unwrap();
+                    string
+                }),
+                SuggestChangingConstraintsMessage::RestrictTypeFurther { ty: param_name },
+            ));
+            continue;
+        }
+
+        // Additionally, there may be no `where` clause but the generic parameter has a default:
         //
         //    Message:
         //      trait Foo<T=()> {... }
-        //             - help: consider further restricting this type parameter with `where T: Zar`
+        //                - help: consider further restricting this type parameter with `where T: Zar`
         //
         //    Suggestion:
-        //      trait Foo<T=()> where T: Zar {... }
+        //      trait Foo<T=()> {... }
         //                     - insert: `where T: Zar`
+        if matches!(param.kind, hir::GenericParamKind::Type { default: Some(_), .. }) {
+            // If we are here and the where clause span is of non-zero length
+            // it means we're dealing with an empty where clause like this:
+            //      fn foo<X>(x: X) where { ... }
+            // In that case we don't want to add another "where" (Fixes #120838)
+            let where_prefix = if generics.where_clause_span.is_empty() { " where" } else { "" };
 
-        if matches!(param.kind, hir::GenericParamKind::Type { default: Some(_), .. })
-            && generics.where_clause.predicates.len() == 0
-        {
             // Suggest a bound, but there is no existing `where` clause *and* the type param has a
             // default (`<T=Foo>`), so we suggest adding `where T: Bar`.
-            err.span_suggestion_verbose(
-                generics.where_clause.tail_span_for_suggestion(),
-                &msg_restrict_type_further,
-                format!(" where {}: {}", param_name, constraint),
-                Applicability::MachineApplicable,
-            );
-        } else {
-            let mut param_spans = Vec::new();
-
-            for predicate in generics.where_clause.predicates {
-                if let WherePredicate::BoundPredicate(WhereBoundPredicate {
-                    span,
-                    bounded_ty,
-                    ..
-                }) = predicate
-                {
-                    if let TyKind::Path(QPath::Resolved(_, path)) = &bounded_ty.kind {
-                        if let Some(segment) = path.segments.first() {
-                            if segment.ident.to_string() == param_name {
-                                param_spans.push(span);
-                            }
-                        }
-                    }
-                }
-            }
-
-            match param_spans[..] {
-                [&param_span] => suggest_restrict(param_span.shrink_to_hi()),
-                _ => {
-                    err.span_suggestion_verbose(
-                        generics.where_clause.tail_span_for_suggestion(),
-                        &msg_restrict_type_further,
-                        format!(", {}: {}", param_name, constraint),
-                        Applicability::MachineApplicable,
-                    );
-                }
-            }
+            suggestions.push((
+                generics.tail_span_for_predicate_suggestion(),
+                format!("{where_prefix} {param_name}: {constraint}"),
+                SuggestChangingConstraintsMessage::RestrictTypeFurther { ty: param_name },
+            ));
+            continue;
         }
 
-        true
+        // If user has provided a colon, don't suggest adding another:
+        //
+        //   fn foo<T:>(t: T) { ... }
+        //            - insert: consider restricting this type parameter with `T: Foo`
+        if let Some(colon_span) = param.colon_span {
+            suggestions.push((
+                colon_span.shrink_to_hi(),
+                format!(" {constraint}"),
+                SuggestChangingConstraintsMessage::RestrictType { ty: param_name },
+            ));
+            continue;
+        }
+
+        // If user hasn't provided any bounds, suggest adding a new one:
+        //
+        //   fn foo<T>(t: T) { ... }
+        //          - help: consider restricting this type parameter with `T: Foo`
+        suggestions.push((
+            param.span.shrink_to_hi(),
+            format!(": {constraint}"),
+            SuggestChangingConstraintsMessage::RestrictType { ty: param_name },
+        ));
     }
+
+    // FIXME: remove the suggestions that are from derive, as the span is not correct
+    suggestions = suggestions
+        .into_iter()
+        .filter(|(span, _, _)| !span.in_derive_expansion())
+        .collect::<Vec<_>>();
+
+    if suggestions.len() == 1 {
+        let (span, suggestion, msg) = suggestions.pop().unwrap();
+        let msg = match msg {
+            SuggestChangingConstraintsMessage::RestrictBoundFurther => {
+                Cow::from("consider further restricting this bound")
+            }
+            SuggestChangingConstraintsMessage::RestrictType { ty } => {
+                Cow::from(format!("consider restricting type parameter `{ty}`"))
+            }
+            SuggestChangingConstraintsMessage::RestrictTypeFurther { ty } => {
+                Cow::from(format!("consider further restricting type parameter `{ty}`"))
+            }
+            SuggestChangingConstraintsMessage::RemoveMaybeUnsized => {
+                Cow::from("consider removing the `?Sized` bound to make the type parameter `Sized`")
+            }
+            SuggestChangingConstraintsMessage::ReplaceMaybeUnsizedWithSized => {
+                Cow::from("consider replacing `?Sized` with `Sized`")
+            }
+        };
+
+        err.span_suggestion_verbose(span, msg, suggestion, applicability);
+    } else if suggestions.len() > 1 {
+        err.multipart_suggestion_verbose(
+            "consider restricting type parameters",
+            suggestions.into_iter().map(|(span, suggestion, _)| (span, suggestion)).collect(),
+            applicability,
+        );
+    }
+
+    true
 }
 
 /// Collect al types that have an implicit `'static` obligation that we could suggest `'_` for.
@@ -459,19 +502,13 @@ impl<'v> hir::intravisit::Visitor<'v> for TraitObjectVisitor<'v> {
             hir::TyKind::TraitObject(
                 _,
                 hir::Lifetime {
-                    name:
+                    res:
                         hir::LifetimeName::ImplicitObjectLifetimeDefault | hir::LifetimeName::Static,
                     ..
                 },
                 _,
-            ) => {
-                self.0.push(ty);
-            }
-            hir::TyKind::OpaqueDef(item_id, _) => {
-                self.0.push(ty);
-                let item = self.1.item(item_id);
-                hir::intravisit::walk_item(self, item);
-            }
+            )
+            | hir::TyKind::OpaqueDef(..) => self.0.push(ty),
             _ => {}
         }
         hir::intravisit::walk_ty(self, ty);
@@ -483,10 +520,178 @@ pub struct StaticLifetimeVisitor<'tcx>(pub Vec<Span>, pub crate::hir::map::Map<'
 
 impl<'v> hir::intravisit::Visitor<'v> for StaticLifetimeVisitor<'v> {
     fn visit_lifetime(&mut self, lt: &'v hir::Lifetime) {
-        if let hir::LifetimeName::ImplicitObjectLifetimeDefault | hir::LifetimeName::Static =
-            lt.name
+        if let hir::LifetimeName::ImplicitObjectLifetimeDefault | hir::LifetimeName::Static = lt.res
         {
-            self.0.push(lt.span);
+            self.0.push(lt.ident.span);
         }
+    }
+}
+
+pub struct IsSuggestableVisitor<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    infer_suggestable: bool,
+}
+
+impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for IsSuggestableVisitor<'tcx> {
+    type Result = ControlFlow<()>;
+
+    fn visit_ty(&mut self, t: Ty<'tcx>) -> Self::Result {
+        match *t.kind() {
+            Infer(InferTy::TyVar(_)) if self.infer_suggestable => {}
+
+            FnDef(..)
+            | Closure(..)
+            | Infer(..)
+            | Coroutine(..)
+            | CoroutineWitness(..)
+            | Bound(_, _)
+            | Placeholder(_)
+            | Error(_) => {
+                return ControlFlow::Break(());
+            }
+
+            Alias(Opaque, AliasTy { def_id, .. }) => {
+                let parent = self.tcx.parent(def_id);
+                let parent_ty = self.tcx.type_of(parent).instantiate_identity();
+                if let DefKind::TyAlias | DefKind::AssocTy = self.tcx.def_kind(parent)
+                    && let Alias(Opaque, AliasTy { def_id: parent_opaque_def_id, .. }) =
+                        *parent_ty.kind()
+                    && parent_opaque_def_id == def_id
+                {
+                    // Okay
+                } else {
+                    return ControlFlow::Break(());
+                }
+            }
+
+            Alias(Projection, AliasTy { def_id, .. }) => {
+                if self.tcx.def_kind(def_id) != DefKind::AssocTy {
+                    return ControlFlow::Break(());
+                }
+            }
+
+            Param(param) => {
+                // FIXME: It would be nice to make this not use string manipulation,
+                // but it's pretty hard to do this, since `ty::ParamTy` is missing
+                // sufficient info to determine if it is synthetic, and we don't
+                // always have a convenient way of getting `ty::Generics` at the call
+                // sites we invoke `IsSuggestable::is_suggestable`.
+                if param.name.as_str().starts_with("impl ") {
+                    return ControlFlow::Break(());
+                }
+            }
+
+            _ => {}
+        }
+
+        t.super_visit_with(self)
+    }
+
+    fn visit_const(&mut self, c: Const<'tcx>) -> Self::Result {
+        match c.kind() {
+            ConstKind::Infer(InferConst::Var(_)) if self.infer_suggestable => {}
+
+            // effect variables are always suggestable, because they are not visible
+            ConstKind::Infer(InferConst::EffectVar(_)) => {}
+
+            ConstKind::Infer(..)
+            | ConstKind::Bound(..)
+            | ConstKind::Placeholder(..)
+            | ConstKind::Error(..) => {
+                return ControlFlow::Break(());
+            }
+            _ => {}
+        }
+
+        c.super_visit_with(self)
+    }
+}
+
+pub struct MakeSuggestableFolder<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    infer_suggestable: bool,
+    placeholder: Option<Ty<'tcx>>,
+}
+
+impl<'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for MakeSuggestableFolder<'tcx> {
+    type Error = ();
+
+    fn cx(&self) -> TyCtxt<'tcx> {
+        self.tcx
+    }
+
+    fn try_fold_ty(&mut self, t: Ty<'tcx>) -> Result<Ty<'tcx>, Self::Error> {
+        let t = match *t.kind() {
+            Infer(InferTy::TyVar(_)) if self.infer_suggestable => t,
+
+            FnDef(def_id, args) if self.placeholder.is_none() => {
+                Ty::new_fn_ptr(self.tcx, self.tcx.fn_sig(def_id).instantiate(self.tcx, args))
+            }
+
+            Closure(..)
+            | FnDef(..)
+            | Infer(..)
+            | Coroutine(..)
+            | CoroutineWitness(..)
+            | Bound(_, _)
+            | Placeholder(_)
+            | Error(_) => {
+                if let Some(placeholder) = self.placeholder {
+                    // We replace these with infer (which is passed in from an infcx).
+                    placeholder
+                } else {
+                    return Err(());
+                }
+            }
+
+            Alias(Opaque, AliasTy { def_id, .. }) => {
+                let parent = self.tcx.parent(def_id);
+                let parent_ty = self.tcx.type_of(parent).instantiate_identity();
+                if let hir::def::DefKind::TyAlias | hir::def::DefKind::AssocTy =
+                    self.tcx.def_kind(parent)
+                    && let Alias(Opaque, AliasTy { def_id: parent_opaque_def_id, .. }) =
+                        *parent_ty.kind()
+                    && parent_opaque_def_id == def_id
+                {
+                    t
+                } else {
+                    return Err(());
+                }
+            }
+
+            Param(param) => {
+                // FIXME: It would be nice to make this not use string manipulation,
+                // but it's pretty hard to do this, since `ty::ParamTy` is missing
+                // sufficient info to determine if it is synthetic, and we don't
+                // always have a convenient way of getting `ty::Generics` at the call
+                // sites we invoke `IsSuggestable::is_suggestable`.
+                if param.name.as_str().starts_with("impl ") {
+                    return Err(());
+                }
+
+                t
+            }
+
+            _ => t,
+        };
+
+        t.try_super_fold_with(self)
+    }
+
+    fn try_fold_const(&mut self, c: Const<'tcx>) -> Result<Const<'tcx>, ()> {
+        let c = match c.kind() {
+            ConstKind::Infer(InferConst::Var(_)) if self.infer_suggestable => c,
+
+            ConstKind::Infer(..)
+            | ConstKind::Bound(..)
+            | ConstKind::Placeholder(..)
+            | ConstKind::Error(..) => {
+                return Err(());
+            }
+
+            _ => c,
+        };
+
+        c.try_super_fold_with(self)
     }
 }

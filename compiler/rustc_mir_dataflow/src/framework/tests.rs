@@ -2,9 +2,7 @@
 
 use std::marker::PhantomData;
 
-use rustc_index::bit_set::BitSet;
-use rustc_index::vec::IndexVec;
-use rustc_middle::mir::{self, BasicBlock, Location};
+use rustc_index::IndexVec;
 use rustc_middle::ty;
 use rustc_span::DUMMY_SP;
 
@@ -14,7 +12,7 @@ use super::*;
 ///
 /// This is the `Body` that will be used by the `MockAnalysis` below. The shape of its CFG is not
 /// important.
-fn mock_body() -> mir::Body<'static> {
+fn mock_body<'tcx>() -> mir::Body<'tcx> {
     let source_info = mir::SourceInfo::outermost(DUMMY_SP);
 
     let mut blocks = IndexVec::new();
@@ -32,30 +30,26 @@ fn mock_body() -> mir::Body<'static> {
 
     block(4, mir::TerminatorKind::Return);
     block(1, mir::TerminatorKind::Return);
-    block(
-        2,
-        mir::TerminatorKind::Call {
-            func: mir::Operand::Copy(dummy_place.clone()),
-            args: vec![],
-            destination: Some((dummy_place.clone(), mir::START_BLOCK)),
-            cleanup: None,
-            from_hir_call: false,
-            fn_span: DUMMY_SP,
-        },
-    );
+    block(2, mir::TerminatorKind::Call {
+        func: mir::Operand::Copy(dummy_place.clone()),
+        args: [].into(),
+        destination: dummy_place.clone(),
+        target: Some(mir::START_BLOCK),
+        unwind: mir::UnwindAction::Continue,
+        call_source: mir::CallSource::Misc,
+        fn_span: DUMMY_SP,
+    });
     block(3, mir::TerminatorKind::Return);
     block(0, mir::TerminatorKind::Return);
-    block(
-        4,
-        mir::TerminatorKind::Call {
-            func: mir::Operand::Copy(dummy_place.clone()),
-            args: vec![],
-            destination: Some((dummy_place.clone(), mir::START_BLOCK)),
-            cleanup: None,
-            from_hir_call: false,
-            fn_span: DUMMY_SP,
-        },
-    );
+    block(4, mir::TerminatorKind::Call {
+        func: mir::Operand::Copy(dummy_place.clone()),
+        args: [].into(),
+        destination: dummy_place.clone(),
+        target: Some(mir::START_BLOCK),
+        unwind: mir::UnwindAction::Continue,
+        call_source: mir::CallSource::Misc,
+        fn_span: DUMMY_SP,
+    });
 
     mir::Body::new_cfg_only(blocks)
 }
@@ -98,9 +92,9 @@ impl<D: Direction> MockAnalysis<'_, D> {
 
     fn mock_entry_sets(&self) -> IndexVec<BasicBlock, BitSet<usize>> {
         let empty = self.bottom_value(self.body);
-        let mut ret = IndexVec::from_elem(empty, &self.body.basic_blocks());
+        let mut ret = IndexVec::from_elem(empty, &self.body.basic_blocks);
 
-        for (bb, _) in self.body.basic_blocks().iter_enumerated() {
+        for (bb, _) in self.body.basic_blocks.iter_enumerated() {
             ret[bb] = self.mock_entry_set(bb);
         }
 
@@ -138,7 +132,7 @@ impl<D: Direction> MockAnalysis<'_, D> {
             SeekTarget::After(loc) => Effect::Primary.at_index(loc.statement_index),
         };
 
-        let mut pos = if D::is_forward() {
+        let mut pos = if D::IS_FORWARD {
             Effect::Before.at_index(0)
         } else {
             Effect::Before.at_index(self.body[block].statements.len())
@@ -151,7 +145,7 @@ impl<D: Direction> MockAnalysis<'_, D> {
                 return ret;
             }
 
-            if D::is_forward() {
+            if D::IS_FORWARD {
                 pos = pos.next_in_forward_order();
             } else {
                 pos = pos.next_in_backward_order();
@@ -167,7 +161,7 @@ impl<'tcx, D: Direction> AnalysisDomain<'tcx> for MockAnalysis<'tcx, D> {
     const NAME: &'static str = "mock";
 
     fn bottom_value(&self, body: &mir::Body<'tcx>) -> Self::Domain {
-        BitSet::new_empty(Self::BASIC_BLOCK_OFFSET + body.basic_blocks().len())
+        BitSet::new_empty(Self::BASIC_BLOCK_OFFSET + body.basic_blocks.len())
     }
 
     fn initialize_start_block(&self, _: &mir::Body<'tcx>, _: &mut Self::Domain) {
@@ -177,7 +171,7 @@ impl<'tcx, D: Direction> AnalysisDomain<'tcx> for MockAnalysis<'tcx, D> {
 
 impl<'tcx, D: Direction> Analysis<'tcx> for MockAnalysis<'tcx, D> {
     fn apply_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::Domain,
         _statement: &mir::Statement<'tcx>,
         location: Location,
@@ -187,7 +181,7 @@ impl<'tcx, D: Direction> Analysis<'tcx> for MockAnalysis<'tcx, D> {
     }
 
     fn apply_before_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::Domain,
         _statement: &mir::Statement<'tcx>,
         location: Location,
@@ -196,18 +190,19 @@ impl<'tcx, D: Direction> Analysis<'tcx> for MockAnalysis<'tcx, D> {
         assert!(state.insert(idx));
     }
 
-    fn apply_terminator_effect(
-        &self,
+    fn apply_terminator_effect<'mir>(
+        &mut self,
         state: &mut Self::Domain,
-        _terminator: &mir::Terminator<'tcx>,
+        terminator: &'mir mir::Terminator<'tcx>,
         location: Location,
-    ) {
+    ) -> TerminatorEdges<'mir, 'tcx> {
         let idx = self.effect(Effect::Primary.at_index(location.statement_index));
         assert!(state.insert(idx));
+        terminator.edges()
     }
 
     fn apply_before_terminator_effect(
-        &self,
+        &mut self,
         state: &mut Self::Domain,
         _terminator: &mir::Terminator<'tcx>,
         location: Location,
@@ -217,7 +212,7 @@ impl<'tcx, D: Direction> Analysis<'tcx> for MockAnalysis<'tcx, D> {
     }
 
     fn apply_call_return_effect(
-        &self,
+        &mut self,
         _state: &mut Self::Domain,
         _block: BasicBlock,
         _return_places: CallReturnPlaces<'_, 'tcx>,
@@ -269,9 +264,7 @@ fn test_cursor<D: Direction>(analysis: MockAnalysis<'_, D>) {
     cursor.allow_unreachable();
 
     let every_target = || {
-        body.basic_blocks()
-            .iter_enumerated()
-            .flat_map(|(bb, _)| SeekTarget::iter_in_block(body, bb))
+        body.basic_blocks.iter_enumerated().flat_map(|(bb, _)| SeekTarget::iter_in_block(body, bb))
     };
 
     let mut seek_to_target = |targ| {

@@ -13,7 +13,7 @@ To learn more about how rust-analyzer works, see [./architecture.md](./architect
 It also explains the high-level layout of the source code.
 Do skim through that document.
 
-We also publish rustdoc docs to pages: https://rust-analyzer.github.io/rust-analyzer/ide/.
+We also publish rustdoc docs to pages: https://rust-lang.github.io/rust-analyzer/ide/.
 Note though, that the internal documentation is very incomplete.
 
 Various organizational and process issues are discussed in this document.
@@ -28,26 +28,26 @@ https://rust-lang.zulipchat.com/#narrow/stream/185405-t-compiler.2Frust-analyzer
 
 # Issue Labels
 
-* [good-first-issue](https://github.com/rust-analyzer/rust-analyzer/labels/good%20first%20issue)
+* [good-first-issue](https://github.com/rust-lang/rust-analyzer/labels/good%20first%20issue)
   are good issues to get into the project.
-* [E-has-instructions](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-has-instructions)
+* [E-has-instructions](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-has-instructions)
   issues have links to the code in question and tests.
-* [Broken Window](https://github.com/rust-analyzer/rust-analyzer/issues?q=is:issue+is:open+label:%22Broken+Window%22)
+* [Broken Window](https://github.com/rust-lang/rust-analyzer/issues?q=is:issue+is:open+label:%22Broken+Window%22)
   are issues which are not necessarily critical by themselves, but which should be fixed ASAP regardless, to avoid accumulation of technical debt.
-* [E-easy](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-easy),
-  [E-medium](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-medium),
-  [E-hard](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-hard),
-  [E-unknown](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-unknown),
+* [E-easy](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-easy),
+  [E-medium](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-medium),
+  [E-hard](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-hard),
+  [E-unknown](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AE-unknown),
   labels are *estimates* for how hard would be to write a fix. Each triaged issue should have one of these labels.
-* [S-actionable](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AS-actionable) and
-  [S-unactionable](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AS-unactionable)
+* [S-actionable](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AS-actionable) and
+  [S-unactionable](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3AS-unactionable)
   specify if there are concrete steps to resolve or advance an issue. Roughly, actionable issues need only work to be fixed,
   while unactionable ones are blocked either on user feedback (providing a reproducible example), or on larger architectural
   work or decisions. This classification is descriptive, not prescriptive, and might be wrong: Any unactionable issue might have a simple fix that we missed.
   Each triaged issue should have one of these labels.
-* [fun](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3Afun)
+* [fun](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3Afun)
   is for cool, but probably hard stuff.
-* [Design](https://github.com/rust-analyzer/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%Design)
+* [Design](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%Design)
   is for moderate/large scale architecture discussion.
   Also a kind of fun.
   These issues should generally include a link to a Zulip discussion thread.
@@ -66,7 +66,7 @@ If `cargo test` passes locally, that's a good sign that CI will be green as well
 The only exception is that some long-running tests are skipped locally by default.
 Use `env RUN_SLOW_TESTS=1 cargo test` to run the full suite.
 
-We use bors-ng to enforce the [not rocket science](https://graydon2.dreamwidth.org/1597.html) rule.
+We use bors to enforce the [not rocket science](https://graydon2.dreamwidth.org/1597.html) rule.
 
 ## Launching rust-analyzer
 
@@ -82,7 +82,7 @@ There's **"Run Extension (Debug Build)"** launch configuration for this in VS Co
 In general, I use one of the following workflows for fixing bugs and implementing features:
 
 If the problem concerns only internal parts of rust-analyzer (i.e. I don't need to touch the `rust-analyzer` crate or TypeScript code), there is a unit-test for it.
-So, I use **Rust Analyzer: Run** action in VS Code to run this single test, and then just do printf-driven development/debugging.
+So, I use **rust-analyzer: Run** action in VS Code to run this single test, and then just do printf-driven development/debugging.
 As a sanity check after I'm done, I use `cargo xtask install --server` and **Reload Window** action in VS Code to verify that the thing works as I expect.
 
 If the problem concerns only the VS Code extension, I use **Run Installed Extension** launch configuration from `launch.json`.
@@ -98,7 +98,7 @@ After I am done with the fix, I use `cargo xtask install --client` to try the ne
 If I need to fix something in the `rust-analyzer` crate, I feel sad because it's on the boundary between the two processes, and working there is slow.
 I usually just `cargo xtask install --server` and poke changes from my live environment.
 Note that this uses `--release`, which is usually faster overall, because loading stdlib into debug version of rust-analyzer takes a lot of time.
-To speed things up, sometimes I open a temporary hello-world project which has `"rust-analyzer.cargo.noSysroot": true` in `.code/settings.json`.
+To speed things up, sometimes I open a temporary hello-world project which has `"rust-analyzer.cargo.sysroot": null` in `.code/settings.json`.
 This flag causes rust-analyzer to skip loading the sysroot, which greatly reduces the amount of things rust-analyzer needs to do, and makes printf's more useful.
 Note that you should only use the `eprint!` family of macros for debugging: stdout is used for LSP communication, and `print!` would break it.
 
@@ -119,11 +119,11 @@ npm run lint
 ```
 ## How to ...
 
-* ... add an assist? [#7535](https://github.com/rust-analyzer/rust-analyzer/pull/7535)
-* ... add a new protocol extension? [#4569](https://github.com/rust-analyzer/rust-analyzer/pull/4569)
-* ... add a new configuration option? [#7451](https://github.com/rust-analyzer/rust-analyzer/pull/7451)
-* ... add a new completion? [#6964](https://github.com/rust-analyzer/rust-analyzer/pull/6964)
-* ... allow new syntax in the parser? [#7338](https://github.com/rust-analyzer/rust-analyzer/pull/7338)
+* ... add an assist? [#7535](https://github.com/rust-lang/rust-analyzer/pull/7535)
+* ... add a new protocol extension? [#4569](https://github.com/rust-lang/rust-analyzer/pull/4569)
+* ... add a new configuration option? [#7451](https://github.com/rust-lang/rust-analyzer/pull/7451)
+* ... add a new completion? [#6964](https://github.com/rust-lang/rust-analyzer/pull/6964)
+* ... allow new syntax in the parser? [#7338](https://github.com/rust-lang/rust-analyzer/pull/7338)
 
 ## Logging
 
@@ -145,18 +145,18 @@ To log all communication between the server and the client, there are two choice
   ```
   env RA_LOG=lsp_server=debug code .
   ```
-* You can log on the client side, by enabling `"rust-analyzer.trace.server": "verbose"` workspace setting.
+* You can log on the client side, by the `rust-analyzer: Toggle LSP Logs` command or enabling `"rust-analyzer.trace.server": "verbose"` workspace setting.
   These logs are shown in a separate tab in the output and could be used with LSP inspector.
   Kudos to [@DJMcNab](https://github.com/DJMcNab) for setting this awesome infra up!
 
 
 There are also several VS Code commands which might be of interest:
 
-* `Rust Analyzer: Status` shows some memory-usage statistics.
+* `rust-analyzer: Status` shows some memory-usage statistics.
 
-* `Rust Analyzer: Syntax Tree` shows syntax tree of the current file/selection.
+* `rust-analyzer: Syntax Tree` shows syntax tree of the current file/selection.
 
-* `Rust Analyzer: View Hir` shows the HIR expressions within the function containing the cursor.
+* `rust-analyzer: View Hir` shows the HIR expressions within the function containing the cursor.
 
   You can hover over syntax nodes in the opened text file to see the appropriate
   rust code that it refers to and the rust editor will also highlight the proper
@@ -178,7 +178,15 @@ RA_PROFILE=foo|bar|baz   // enabled only selected entries
 RA_PROFILE=*@3>10        // dump everything, up to depth 3, if it takes more than 10 ms
 ```
 
-In particular, I have `export RA_PROFILE='*>10'` in my shell profile.
+Some rust-analyzer contributors have `export RA_PROFILE='*>10'` in my shell profile.
+
+For machine-readable JSON output, we have the `RA_PROFILE_JSON` env variable. We support
+filtering only by span name:
+
+```
+RA_PROFILE=* // dump everything
+RA_PROFILE_JSON="vfs_load|parallel_prime_caches|discover_command" // dump selected spans
+```
 
 We also have a "counting" profiler which counts number of instances of popular structs.
 It is enabled by `RA_COUNT=1`.
@@ -200,7 +208,7 @@ Look for `fn benchmark_xxx` tests for a quick way to reproduce performance probl
 
 ## Release Process
 
-Release process is handled by `release`, `dist` and `promote` xtasks, `release` being the main one.
+Release process is handled by `release`, `dist`, `publish-release-notes` and `promote` xtasks, `release` being the main one.
 
 `release` assumes that you have checkouts of `rust-analyzer`, `rust-analyzer.github.io`, and `rust-lang/rust` in the same directory:
 
@@ -210,7 +218,8 @@ Release process is handled by `release`, `dist` and `promote` xtasks, `release` 
 ./rust-rust-analyzer  # Note the name!
 ```
 
-Additionally, it assumes that the remote for `rust-analyzer` is called `upstream` (I use `origin` to point to my fork).
+The remote for `rust-analyzer` must be called `upstream` (I use `origin` to point to my fork).
+In addition, for `xtask promote` (see below), `rust-rust-analyzer` must have a `rust-analyzer` remote pointing to this repository on GitHub.
 
 `release` calls the GitHub API calls to scrape pull request comments and categorize them in the changelog.
 This step uses the `curl` and `jq` applications, which need to be available in `PATH`.
@@ -225,14 +234,25 @@ Release steps:
    * push it to `upstream`. This triggers GitHub Actions which:
      * runs `cargo xtask dist` to package binaries and VS Code extension
      * makes a GitHub release
-     * pushes VS Code extension to the marketplace
+     * publishes the VS Code extension to the marketplace
    * call the GitHub API for PR details
    * create a new changelog in `rust-analyzer.github.io`
-3. While the release is in progress, fill in the changelog
-4. Commit & push the changelog
-5. Tweet
-6. Inside `rust-analyzer`, run `cargo xtask promote` -- this will create a PR to rust-lang/rust updating rust-analyzer's submodule.
-   Self-approve the PR.
+3. While the release is in progress, fill in the changelog.
+4. Commit & push the changelog.
+5. Run `cargo xtask publish-release-notes <CHANGELOG>` -- this will convert the changelog entry in AsciiDoc to Markdown and update the body of GitHub Releases entry.
+6. Tweet.
+7. Make a new branch and run `cargo xtask rustc-pull`, open a PR, and merge it.
+   This will pull any changes from `rust-lang/rust` into `rust-analyzer`.
+8. Switch to `master`, pull, then run `cargo xtask rustc-push --rust-path ../rust-rust-analyzer --rust-fork matklad/rust`.
+   Replace `matklad/rust` with your own fork of `rust-lang/rust`.
+   You can use the token to authenticate when you get prompted for a password, since `josh` will push over HTTPS, not SSH.
+   This will push the `rust-analyzer` changes to your fork.
+   You can then open a PR against `rust-lang/rust`.
+
+Note: besides the `rust-rust-analyzer` clone, the Josh cache (stored under `~/.cache/rust-analyzer-josh`) will contain a bare clone of `rust-lang/rust`.
+This currently takes about 3.5 GB.
+
+This [HackMD](https://hackmd.io/7pOuxnkdQDaL1Y1FQr65xg) has details about how `josh` syncs work.
 
 If the GitHub Actions release fails because of a transient problem like a timeout, you can re-run the job from the Actions console.
 If it fails because of something that needs to be fixed, remove the release tag (if needed), fix the problem, then start over.

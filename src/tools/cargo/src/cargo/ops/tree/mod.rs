@@ -4,11 +4,11 @@ use self::format::Pattern;
 use crate::core::compiler::{CompileKind, RustcTargetData};
 use crate::core::dependency::DepKind;
 use crate::core::resolver::{features::CliFeatures, ForceAllTargets, HasDevUnits};
-use crate::core::{Package, PackageId, PackageIdSpec, Workspace};
+use crate::core::{Package, PackageId, PackageIdSpec, PackageIdSpecQuery, Workspace};
 use crate::ops::{self, Packages};
-use crate::util::{CargoResult, Config};
+use crate::util::{CargoResult, GlobalContext};
 use crate::{drop_print, drop_println};
-use anyhow::Context;
+use anyhow::Context as _;
 use graph::Graph;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -39,15 +39,13 @@ pub struct TreeOptions {
     /// appear with different versions, and report if any where found. Implies
     /// `invert`.
     pub duplicates: bool,
-    /// The style of characters to use.
-    pub charset: Charset,
     /// A format string indicating how each package should be displayed.
     pub format: String,
     /// Includes features in the tree as separate nodes.
     pub graph_features: bool,
     /// Maximum display depth of the dependency tree.
     pub max_display_depth: u32,
-    /// Exculdes proc-macro dependencies.
+    /// Excludes proc-macro dependencies.
     pub no_proc_macro: bool,
 }
 
@@ -64,23 +62,6 @@ impl Target {
             0 => Target::Host,
             1 if targets[0] == "all" => Target::All,
             _ => Target::Specific(targets),
-        }
-    }
-}
-
-pub enum Charset {
-    Utf8,
-    Ascii,
-}
-
-impl FromStr for Charset {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Charset, &'static str> {
-        match s {
-            "utf8" => Ok(Charset::Utf8),
-            "ascii" => Ok(Charset::Ascii),
-            _ => Err("invalid charset"),
         }
     }
 }
@@ -134,8 +115,8 @@ pub fn build_and_print(ws: &Workspace<'_>, opts: &TreeOptions) -> CargoResult<()
     };
     // TODO: Target::All is broken with -Zfeatures=itarget. To handle that properly,
     // `FeatureResolver` will need to be taught what "all" means.
-    let requested_kinds = CompileKind::from_requested_targets(ws.config(), &requested_targets)?;
-    let target_data = RustcTargetData::new(ws, &requested_kinds)?;
+    let requested_kinds = CompileKind::from_requested_targets(ws.gctx(), &requested_targets)?;
+    let mut target_data = RustcTargetData::new(ws, &requested_kinds)?;
     let specs = opts.packages.to_package_id_specs(ws)?;
     let has_dev = if opts
         .edge_kinds
@@ -150,14 +131,16 @@ pub fn build_and_print(ws: &Workspace<'_>, opts: &TreeOptions) -> CargoResult<()
     } else {
         ForceAllTargets::No
     };
+    let dry_run = false;
     let ws_resolve = ops::resolve_ws_with_opts(
         ws,
-        &target_data,
+        &mut target_data,
         &requested_kinds,
         &opts.cli_features,
         &specs,
         has_dev,
         force_all,
+        dry_run,
     )?;
 
     let package_map: HashMap<PackageId, &Package> = ws_resolve
@@ -184,7 +167,7 @@ pub fn build_and_print(ws: &Workspace<'_>, opts: &TreeOptions) -> CargoResult<()
         opts.invert
             .iter()
             .map(|p| PackageIdSpec::parse(p))
-            .collect::<CargoResult<Vec<PackageIdSpec>>>()?
+            .collect::<Result<Vec<PackageIdSpec>, _>>()?
     };
     let root_ids = ws_resolve.targeted_resolve.specs_to_ids(&root_specs)?;
     let root_indexes = graph.indexes_from_ids(&root_ids);
@@ -205,7 +188,7 @@ pub fn build_and_print(ws: &Workspace<'_>, opts: &TreeOptions) -> CargoResult<()
     let pkgs_to_prune = opts
         .pkgs_to_prune
         .iter()
-        .map(|p| PackageIdSpec::parse(p))
+        .map(|p| PackageIdSpec::parse(p).map_err(Into::into))
         .map(|r| {
             // Provide an error message if pkgid is not within the resolved
             // dependencies graph.
@@ -213,13 +196,21 @@ pub fn build_and_print(ws: &Workspace<'_>, opts: &TreeOptions) -> CargoResult<()
         })
         .collect::<CargoResult<Vec<PackageIdSpec>>>()?;
 
-    print(ws.config(), opts, root_indexes, &pkgs_to_prune, &graph)?;
+    if root_indexes.len() == 0 {
+        ws.gctx().shell().warn(
+            "nothing to print.\n\n\
+        To find dependencies that require specific target platforms, \
+        try to use option `--target all` first, and then narrow your search scope accordingly.",
+        )?;
+    } else {
+        print(ws.gctx(), opts, root_indexes, &pkgs_to_prune, &graph)?;
+    }
     Ok(())
 }
 
 /// Prints a tree for each given root.
 fn print(
-    config: &Config,
+    gctx: &GlobalContext,
     opts: &TreeOptions,
     roots: Vec<usize>,
     pkgs_to_prune: &[PackageIdSpec],
@@ -228,9 +219,10 @@ fn print(
     let format = Pattern::new(&opts.format)
         .with_context(|| format!("tree format `{}` not valid", opts.format))?;
 
-    let symbols = match opts.charset {
-        Charset::Utf8 => &UTF8_SYMBOLS,
-        Charset::Ascii => &ASCII_SYMBOLS,
+    let symbols = if gctx.shell().out_unicode() {
+        &UTF8_SYMBOLS
+    } else {
+        &ASCII_SYMBOLS
     };
 
     // The visited deps is used to display a (*) whenever a dep has
@@ -239,7 +231,7 @@ fn print(
 
     for (i, root_index) in roots.into_iter().enumerate() {
         if i != 0 {
-            drop_println!(config);
+            drop_println!(gctx);
         }
 
         // A stack of bools used to determine where | symbols should appear
@@ -250,7 +242,7 @@ fn print(
         let mut print_stack = vec![];
 
         print_node(
-            config,
+            gctx,
             graph,
             root_index,
             &format,
@@ -259,7 +251,6 @@ fn print(
             opts.prefix,
             opts.no_dedupe,
             opts.max_display_depth,
-            opts.no_proc_macro,
             &mut visited_deps,
             &mut levels_continue,
             &mut print_stack,
@@ -271,7 +262,7 @@ fn print(
 
 /// Prints a package and all of its dependencies.
 fn print_node<'a>(
-    config: &Config,
+    gctx: &GlobalContext,
     graph: &'a Graph<'_>,
     node_index: usize,
     format: &Pattern,
@@ -280,7 +271,6 @@ fn print_node<'a>(
     prefix: Prefix,
     no_dedupe: bool,
     max_display_depth: u32,
-    no_proc_macro: bool,
     visited_deps: &mut HashSet<usize>,
     levels_continue: &mut Vec<bool>,
     print_stack: &mut Vec<usize>,
@@ -288,12 +278,12 @@ fn print_node<'a>(
     let new = no_dedupe || visited_deps.insert(node_index);
 
     match prefix {
-        Prefix::Depth => drop_print!(config, "{}", levels_continue.len()),
+        Prefix::Depth => drop_print!(gctx, "{}", levels_continue.len()),
         Prefix::Indent => {
             if let Some((last_continues, rest)) = levels_continue.split_last() {
                 for continues in rest {
                     let c = if *continues { symbols.down } else { " " };
-                    drop_print!(config, "{}   ", c);
+                    drop_print!(gctx, "{}   ", c);
                 }
 
                 let c = if *last_continues {
@@ -301,7 +291,7 @@ fn print_node<'a>(
                 } else {
                     symbols.ell
                 };
-                drop_print!(config, "{0}{1}{1} ", c, symbols.right);
+                drop_print!(gctx, "{0}{1}{1} ", c, symbols.right);
             }
         }
         Prefix::None => {}
@@ -317,7 +307,7 @@ fn print_node<'a>(
     } else {
         " (*)"
     };
-    drop_println!(config, "{}{}", format.display(graph, node_index), star);
+    drop_println!(gctx, "{}{}", format.display(graph, node_index), star);
 
     if !new || in_cycle {
         return;
@@ -331,7 +321,7 @@ fn print_node<'a>(
         EdgeKind::Feature,
     ] {
         print_dependencies(
-            config,
+            gctx,
             graph,
             node_index,
             format,
@@ -340,7 +330,6 @@ fn print_node<'a>(
             prefix,
             no_dedupe,
             max_display_depth,
-            no_proc_macro,
             visited_deps,
             levels_continue,
             print_stack,
@@ -352,7 +341,7 @@ fn print_node<'a>(
 
 /// Prints all the dependencies of a package for the given dependency kind.
 fn print_dependencies<'a>(
-    config: &Config,
+    gctx: &GlobalContext,
     graph: &'a Graph<'_>,
     node_index: usize,
     format: &Pattern,
@@ -361,7 +350,6 @@ fn print_dependencies<'a>(
     prefix: Prefix,
     no_dedupe: bool,
     max_display_depth: u32,
-    no_proc_macro: bool,
     visited_deps: &mut HashSet<usize>,
     levels_continue: &mut Vec<bool>,
     print_stack: &mut Vec<usize>,
@@ -383,10 +371,10 @@ fn print_dependencies<'a>(
         if let Some(name) = name {
             for continues in &**levels_continue {
                 let c = if *continues { symbols.down } else { " " };
-                drop_print!(config, "{}   ", c);
+                drop_print!(gctx, "{}   ", c);
             }
 
-            drop_println!(config, "{}", name);
+            drop_println!(gctx, "{}", name);
         }
     }
 
@@ -397,19 +385,6 @@ fn print_dependencies<'a>(
 
     let mut it = deps
         .iter()
-        .filter(|dep| {
-            // Filter out proc-macro dependencies.
-            if no_proc_macro {
-                match graph.node(**dep) {
-                    &Node::Package { package_id, .. } => {
-                        !graph.package_for_id(package_id).proc_macro()
-                    }
-                    _ => true,
-                }
-            } else {
-                true
-            }
-        })
         .filter(|dep| {
             // Filter out packages to prune.
             match graph.node(**dep) {
@@ -424,7 +399,7 @@ fn print_dependencies<'a>(
     while let Some(dependency) = it.next() {
         levels_continue.push(it.peek().is_some());
         print_node(
-            config,
+            gctx,
             graph,
             *dependency,
             format,
@@ -433,7 +408,6 @@ fn print_dependencies<'a>(
             prefix,
             no_dedupe,
             max_display_depth,
-            no_proc_macro,
             visited_deps,
             levels_continue,
             print_stack,

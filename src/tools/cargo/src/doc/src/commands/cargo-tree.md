@@ -1,10 +1,7 @@
 # cargo-tree(1)
-
-
-
 ## NAME
 
-cargo-tree - Display a tree visualization of a dependency graph
+cargo-tree --- Display a tree visualization of a dependency graph
 
 ## SYNOPSIS
 
@@ -53,6 +50,23 @@ turn depends on `cfg-if` with "default" features. When using `-e features` it
 can be helpful to use `-i` flag to show how the features flow into a package.
 See the examples below for more detail.
 
+### Feature Unification
+
+This command shows a graph much closer to a feature-unified graph Cargo will
+build, rather than what you list in `Cargo.toml`. For instance, if you specify
+the same dependency in both `[dependencies]` and `[dev-dependencies]` but with
+different features on. This command may merge all features and show a `(*)` on
+one of the dependency to indicate the duplicate.
+
+As a result, for a mostly equivalent overview of what `cargo build` does,
+`cargo tree -e normal,build` is pretty close; for a mostly equivalent overview
+of what `cargo test` does, `cargo tree` is pretty close. However, it doesn't
+guarantee the exact equivalence to what Cargo is going to build, since a
+compilation is complex and depends on lots of different factors.
+
+To learn more about feature unification, check out this
+[dedicated section](../reference/features.html#feature-unification).
+
 ## OPTIONS
 
 ### Tree Options
@@ -63,11 +77,11 @@ See the examples below for more detail.
 <dt class="option-term" id="option-cargo-tree---invert"><a class="option-anchor" href="#option-cargo-tree---invert"></a><code>--invert</code> <em>spec</em></dt>
 <dd class="option-desc">Show the reverse dependencies for the given package. This flag will invert
 the tree and display the packages that depend on the given package.</p>
-<p>Note that in a workspace, by default it will only display the package's
+<p>Note that in a workspace, by default it will only display the package’s
 reverse dependencies inside the tree of the workspace member in the current
 directory. The <code>--workspace</code> flag can be used to extend it so that it will
-show the package's reverse dependencies across the entire workspace. The <code>-p</code>
-flag can be used to display the package's reverse dependencies only with the
+show the package’s reverse dependencies across the entire workspace. The <code>-p</code>
+flag can be used to display the package’s reverse dependencies only with the
 subtree of the package given to <code>-p</code>.</dd>
 
 
@@ -120,8 +134,8 @@ kind given, then it will automatically include the other dependency kinds.</li>
 
 
 <dt class="option-term" id="option-cargo-tree---target"><a class="option-anchor" href="#option-cargo-tree---target"></a><code>--target</code> <em>triple</em></dt>
-<dd class="option-desc">Filter dependencies matching the given target-triple. The default is the host
-platform. Use the value <code>all</code> to include <em>all</em> targets.</dd>
+<dd class="option-desc">Filter dependencies matching the given <a href="../appendix/glossary.html#target">target triple</a>.
+The default is the host platform. Use the value <code>all</code> to include <em>all</em> targets.</dd>
 
 
 </dl>
@@ -131,13 +145,13 @@ platform. Use the value <code>all</code> to include <em>all</em> targets.</dd>
 <dl>
 
 <dt class="option-term" id="option-cargo-tree---charset"><a class="option-anchor" href="#option-cargo-tree---charset"></a><code>--charset</code> <em>charset</em></dt>
-<dd class="option-desc">Chooses the character set to use for the tree. Valid values are &quot;utf8&quot; or
-&quot;ascii&quot;. Default is &quot;utf8&quot;.</dd>
+<dd class="option-desc">Chooses the character set to use for the tree. Valid values are “utf8” or
+“ascii”. When unspecified, cargo will auto-select a value.</dd>
 
 
 <dt class="option-term" id="option-cargo-tree--f"><a class="option-anchor" href="#option-cargo-tree--f"></a><code>-f</code> <em>format</em></dt>
 <dt class="option-term" id="option-cargo-tree---format"><a class="option-anchor" href="#option-cargo-tree---format"></a><code>--format</code> <em>format</em></dt>
-<dd class="option-desc">Set the format string for each package. The default is &quot;{p}&quot;.</p>
+<dd class="option-desc">Set the format string for each package. The default is “{p}”.</p>
 <p>This is an arbitrary string which will be used to display each package. The following
 strings will be replaced with the corresponding value:</p>
 <ul>
@@ -145,7 +159,7 @@ strings will be replaced with the corresponding value:</p>
 <li><code>{l}</code> — The package license.</li>
 <li><code>{r}</code> — The package repository URL.</li>
 <li><code>{f}</code> — Comma-separated list of package features that are enabled.</li>
-<li><code>{lib}</code> — The name, as used in a <code>use</code> statement, of the package's library.</li>
+<li><code>{lib}</code> — The name, as used in a <code>use</code> statement, of the package’s library.</li>
 </ul></dd>
 
 
@@ -175,11 +189,11 @@ virtual workspace will include all workspace members (equivalent to passing
 
 <dl>
 
-<dt class="option-term" id="option-cargo-tree--p"><a class="option-anchor" href="#option-cargo-tree--p"></a><code>-p</code> <em>spec</em>...</dt>
-<dt class="option-term" id="option-cargo-tree---package"><a class="option-anchor" href="#option-cargo-tree---package"></a><code>--package</code> <em>spec</em>...</dt>
+<dt class="option-term" id="option-cargo-tree--p"><a class="option-anchor" href="#option-cargo-tree--p"></a><code>-p</code> <em>spec</em>…</dt>
+<dt class="option-term" id="option-cargo-tree---package"><a class="option-anchor" href="#option-cargo-tree---package"></a><code>--package</code> <em>spec</em>…</dt>
 <dd class="option-desc">Display only the specified packages. See <a href="cargo-pkgid.html">cargo-pkgid(1)</a> for the
 SPEC format. This flag may be specified multiple times and supports common Unix
-glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell accidentally 
+glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell accidentally
 expanding glob patterns before Cargo handles them, you must use single quotes or
 double quotes around each pattern.</dd>
 
@@ -189,8 +203,7 @@ double quotes around each pattern.</dd>
 
 
 
-
-<dt class="option-term" id="option-cargo-tree---exclude"><a class="option-anchor" href="#option-cargo-tree---exclude"></a><code>--exclude</code> <em>SPEC</em>...</dt>
+<dt class="option-term" id="option-cargo-tree---exclude"><a class="option-anchor" href="#option-cargo-tree---exclude"></a><code>--exclude</code> <em>SPEC</em>…</dt>
 <dd class="option-desc">Exclude the specified packages. Must be used in conjunction with the
 <code>--workspace</code> flag. This flag may be specified multiple times and supports
 common Unix glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell
@@ -199,7 +212,6 @@ single quotes or double quotes around each pattern.</dd>
 
 
 </dl>
-
 
 ### Manifest Options
 
@@ -210,16 +222,16 @@ single quotes or double quotes around each pattern.</dd>
 <code>Cargo.toml</code> file in the current directory or any parent directory.</dd>
 
 
-
-<dt class="option-term" id="option-cargo-tree---frozen"><a class="option-anchor" href="#option-cargo-tree---frozen"></a><code>--frozen</code></dt>
 <dt class="option-term" id="option-cargo-tree---locked"><a class="option-anchor" href="#option-cargo-tree---locked"></a><code>--locked</code></dt>
-<dd class="option-desc">Either of these flags requires that the <code>Cargo.lock</code> file is
-up-to-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The <code>--frozen</code> flag also prevents Cargo from
-attempting to access the network to determine if it is out-of-date.</p>
-<p>These may be used in environments where you want to assert that the
-<code>Cargo.lock</code> file is up-to-date (such as a CI build) or want to avoid network
-access.</dd>
+<dd class="option-desc">Asserts that the exact same dependencies and versions are used as when the
+existing <code>Cargo.lock</code> file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:</p>
+<ul>
+<li>The lock file is missing.</li>
+<li>Cargo attempted to change the lock file due to a different dependency resolution.</li>
+</ul>
+<p>It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.</dd>
 
 
 <dt class="option-term" id="option-cargo-tree---offline"><a class="option-anchor" href="#option-cargo-tree---offline"></a><code>--offline</code></dt>
@@ -235,6 +247,20 @@ offline.</p>
 <p>May also be specified with the <code>net.offline</code> <a href="../reference/config.html">config value</a>.</dd>
 
 
+<dt class="option-term" id="option-cargo-tree---frozen"><a class="option-anchor" href="#option-cargo-tree---frozen"></a><code>--frozen</code></dt>
+<dd class="option-desc">Equivalent to specifying both <code>--locked</code> and <code>--offline</code>.</dd>
+
+
+<dt class="option-term" id="option-cargo-tree---lockfile-path"><a class="option-anchor" href="#option-cargo-tree---lockfile-path"></a><code>--lockfile-path</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the path of the lockfile from the default (<code>&lt;workspace_root&gt;/Cargo.lock</code>) to <em>PATH</em>. <em>PATH</em> must end with
+<code>Cargo.lock</code> (e.g. <code>--lockfile-path /tmp/temporary-lockfile/Cargo.lock</code>). Note that providing
+<code>--lockfile-path</code> will ignore existing lockfile at the default path, and instead will
+either use the lockfile from <em>PATH</em>, or write a new lockfile into the provided <em>PATH</em> if it doesn’t exist.
+This flag can be used to run most commands in read-only directories, writing lockfile into the provided <em>PATH</em>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/14421">#14421</a>).</dd>
 
 </dl>
 
@@ -249,6 +275,7 @@ for more details.
 
 <dl>
 
+<dt class="option-term" id="option-cargo-tree--F"><a class="option-anchor" href="#option-cargo-tree--F"></a><code>-F</code> <em>features</em></dt>
 <dt class="option-term" id="option-cargo-tree---features"><a class="option-anchor" href="#option-cargo-tree---features"></a><code>--features</code> <em>features</em></dt>
 <dd class="option-desc">Space or comma separated list of features to activate. Features of workspace
 members may be enabled with <code>package-name/feature-name</code> syntax. This flag may
@@ -265,14 +292,13 @@ be specified multiple times, which enables all specified features.</dd>
 
 </dl>
 
-
 ### Display Options
 
 <dl>
 
 <dt class="option-term" id="option-cargo-tree--v"><a class="option-anchor" href="#option-cargo-tree--v"></a><code>-v</code></dt>
 <dt class="option-term" id="option-cargo-tree---verbose"><a class="option-anchor" href="#option-cargo-tree---verbose"></a><code>--verbose</code></dt>
-<dd class="option-desc">Use verbose output. May be specified twice for &quot;very verbose&quot; output which
+<dd class="option-desc">Use verbose output. May be specified twice for “very verbose” output which
 includes extra output such as dependency warnings and build script output.
 May also be specified with the <code>term.verbose</code>
 <a href="../reference/config.html">config value</a>.</dd>
@@ -297,7 +323,6 @@ terminal.</li>
 <a href="../reference/config.html">config value</a>.</dd>
 
 
-
 </dl>
 
 ### Common Options
@@ -312,6 +337,23 @@ See the <a href="https://rust-lang.github.io/rustup/overrides.html">rustup docum
 for more information about how toolchain overrides work.</dd>
 
 
+<dt class="option-term" id="option-cargo-tree---config"><a class="option-anchor" href="#option-cargo-tree---config"></a><code>--config</code> <em>KEY=VALUE</em> or <em>PATH</em></dt>
+<dd class="option-desc">Overrides a Cargo configuration value. The argument should be in TOML syntax of <code>KEY=VALUE</code>,
+or provided as a path to an extra configuration file. This flag may be specified multiple times.
+See the <a href="../reference/config.html#command-line-overrides">command-line overrides section</a> for more information.</dd>
+
+
+<dt class="option-term" id="option-cargo-tree--C"><a class="option-anchor" href="#option-cargo-tree--C"></a><code>-C</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the current working directory before executing any specified operations. This affects
+things like where cargo looks by default for the project manifest (<code>Cargo.toml</code>), as well as
+the directories searched for discovering <code>.cargo/config.toml</code>, for example. This option must
+appear before the command name, for example <code>cargo -C path/to/my-project build</code>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/10098">#10098</a>).</dd>
+
+
 <dt class="option-term" id="option-cargo-tree--h"><a class="option-anchor" href="#option-cargo-tree--h"></a><code>-h</code></dt>
 <dt class="option-term" id="option-cargo-tree---help"><a class="option-anchor" href="#option-cargo-tree---help"></a><code>--help</code></dt>
 <dd class="option-desc">Prints help information.</dd>
@@ -323,18 +365,15 @@ for more information about how toolchain overrides work.</dd>
 
 </dl>
 
-
 ## ENVIRONMENT
 
 See [the reference](../reference/environment-variables.html) for
 details on environment variables that Cargo reads.
 
-
 ## EXIT STATUS
 
 * `0`: Cargo succeeded.
 * `101`: Cargo failed to complete.
-
 
 ## EXAMPLES
 

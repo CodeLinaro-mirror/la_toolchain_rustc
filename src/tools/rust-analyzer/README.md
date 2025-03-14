@@ -7,20 +7,15 @@
 rust-analyzer is a modular compiler frontend for the Rust language.
 It is a part of a larger rls-2.0 effort to create excellent IDE support for Rust.
 
-Work on rust-analyzer is sponsored by
-
-[<img src="https://user-images.githubusercontent.com/1711539/58105231-cf306900-7bee-11e9-83d8-9f1102e59d29.png" alt="Ferrous Systems" width="300">](https://ferrous-systems.com/)
-- [Mozilla](https://www.mozilla.org/en-US/)
-- [Embark Studios](https://embark-studios.com/)
-
 ## Quick Start
 
 https://rust-analyzer.github.io/manual.html#installation
 
 ## Documentation
 
-If you want to **contribute** to rust-analyzer or are just curious about how
-things work under the hood, check the [./docs/dev](./docs/dev) folder.
+If you want to **contribute** to rust-analyzer check out the [CONTRIBUTING.md](./CONTRIBUTING.md) or
+if you are just curious about how things work under the hood, check the [./docs/dev](./docs/dev)
+folder.
 
 If you want to **use** rust-analyzer's language server with your editor of
 choice, check [the manual](https://rust-analyzer.github.io/manual.html) folder.
@@ -44,12 +39,12 @@ https://rust-lang.zulipchat.com/#narrow/stream/185405-t-compiler.2Frust-analyzer
 
 * Website: https://rust-analyzer.github.io/
 * Metrics: https://rust-analyzer.github.io/metrics/
-* API docs: https://rust-analyzer.github.io/rust-analyzer/ide/
+* API docs: https://rust-lang.github.io/rust-analyzer/ide/
 * Changelog: https://rust-analyzer.github.io/thisweek
 
 ## License
 
-Rust analyzer is primarily distributed under the terms of both the MIT
+rust-analyzer is primarily distributed under the terms of both the MIT
 license and the Apache License (Version 2.0).
 
 See LICENSE-APACHE and LICENSE-MIT for details.

@@ -93,6 +93,11 @@ bool FileExists(const char *filename) {
   return ::GetFileAttributesA(filename) != INVALID_FILE_ATTRIBUTES;
 }
 
+bool DirExists(const char *path) {
+  auto attr = ::GetFileAttributesA(path);
+  return (attr != INVALID_FILE_ATTRIBUTES) && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 uptr internal_getpid() {
   return GetProcessId(GetCurrentProcess());
 }
@@ -126,6 +131,11 @@ void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
 }
 #endif  // #if !SANITIZER_GO
 
+bool ErrorIsOOM(error_t err) {
+  // TODO: This should check which `err`s correspond to OOM.
+  return false;
+}
+
 void *MmapOrDie(uptr size, const char *mem_type, bool raw_report) {
   void *rv = VirtualAlloc(0, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
   if (rv == 0)
@@ -134,7 +144,7 @@ void *MmapOrDie(uptr size, const char *mem_type, bool raw_report) {
   return rv;
 }
 
-void UnmapOrDie(void *addr, uptr size) {
+void UnmapOrDie(void *addr, uptr size, bool raw_report) {
   if (!size || !addr)
     return;
 
@@ -146,10 +156,7 @@ void UnmapOrDie(void *addr, uptr size) {
   // fails try MEM_DECOMMIT.
   if (VirtualFree(addr, 0, MEM_RELEASE) == 0) {
     if (VirtualFree(addr, size, MEM_DECOMMIT) == 0) {
-      Report("ERROR: %s failed to "
-             "deallocate 0x%zx (%zd) bytes at address %p (error code: %d)\n",
-             SanitizerToolName, size, size, addr, GetLastError());
-      CHECK("unable to unmap" && 0);
+      ReportMunmapFailureAndDie(addr, size, GetLastError(), raw_report);
     }
   }
 }
@@ -224,6 +231,17 @@ void *MmapAlignedOrDieOnFatalError(uptr size, uptr alignment,
   return (void *)mapped_addr;
 }
 
+// ZeroMmapFixedRegion zero's out a region of memory previously returned from a
+// call to one of the MmapFixed* helpers. On non-windows systems this would be
+// done with another mmap, but on windows remapping is not an option.
+// VirtualFree(DECOMMIT)+VirtualAlloc(RECOMMIT) would also be a way to zero the
+// memory, but we can't do this atomically, so instead we fall back to using
+// internal_memset.
+bool ZeroMmapFixedRegion(uptr fixed_addr, uptr size) {
+  internal_memset((void*) fixed_addr, 0, size);
+  return true;
+}
+
 bool MmapFixedNoReserve(uptr fixed_addr, uptr size, const char *name) {
   // FIXME: is this really "NoReserve"? On Win32 this does not matter much,
   // but on Win64 it does.
@@ -258,8 +276,8 @@ void *MmapFixedOrDie(uptr fixed_addr, uptr size, const char *name) {
       MEM_COMMIT, PAGE_READWRITE);
   if (p == 0) {
     char mem_type[30];
-    internal_snprintf(mem_type, sizeof(mem_type), "memory at address 0x%zx",
-                      fixed_addr);
+    internal_snprintf(mem_type, sizeof(mem_type), "memory at address %p",
+                      (void *)fixed_addr);
     ReportMmapFailureAndDie(size, mem_type, "allocate", GetLastError());
   }
   return p;
@@ -290,8 +308,8 @@ void *MmapFixedOrDieOnFatalError(uptr fixed_addr, uptr size, const char *name) {
       MEM_COMMIT, PAGE_READWRITE);
   if (p == 0) {
     char mem_type[30];
-    internal_snprintf(mem_type, sizeof(mem_type), "memory at address 0x%zx",
-                      fixed_addr);
+    internal_snprintf(mem_type, sizeof(mem_type), "memory at address %p",
+                      (void *)fixed_addr);
     return ReturnNullptrOnOOMOrDie(size, mem_type, "allocate");
   }
   return p;
@@ -341,6 +359,11 @@ bool MprotectReadOnly(uptr addr, uptr size) {
   return VirtualProtect((LPVOID)addr, size, PAGE_READONLY, &old_protection);
 }
 
+bool MprotectReadWrite(uptr addr, uptr size) {
+  DWORD old_protection;
+  return VirtualProtect((LPVOID)addr, size, PAGE_READWRITE, &old_protection);
+}
+
 void ReleaseMemoryPagesToOS(uptr beg, uptr end) {
   uptr beg_aligned = RoundDownTo(beg, GetPageSizeCached()),
        end_aligned = RoundDownTo(end, GetPageSizeCached());
@@ -361,9 +384,8 @@ bool DontDumpShadowMemory(uptr addr, uptr length) {
 }
 
 uptr MapDynamicShadow(uptr shadow_size_bytes, uptr shadow_scale,
-                      uptr min_shadow_base_alignment,
-                      UNUSED uptr &high_mem_end) {
-  const uptr granularity = GetMmapGranularity();
+                      uptr min_shadow_base_alignment, UNUSED uptr &high_mem_end,
+                      uptr granularity) {
   const uptr alignment =
       Max<uptr>(granularity << shadow_scale, 1ULL << min_shadow_base_alignment);
   const uptr left_padding =
@@ -517,7 +539,7 @@ void ReExec() {
   UNIMPLEMENTED();
 }
 
-void PlatformPrepareForSandboxing(__sanitizer_sandbox_arguments *args) {}
+void PlatformPrepareForSandboxing(void *args) {}
 
 bool StackSizeIsUnlimited() {
   UNIMPLEMENTED();
@@ -697,13 +719,24 @@ void ListOfModules::fallbackInit() { clear(); }
 // atexit() as soon as it is ready for use (i.e. after .CRT$XIC initializers).
 InternalMmapVectorNoCtor<void (*)(void)> atexit_functions;
 
-int Atexit(void (*function)(void)) {
+static int queueAtexit(void (*function)(void)) {
   atexit_functions.push_back(function);
   return 0;
 }
 
+// If Atexit() is being called after RunAtexit() has already been run, it needs
+// to be able to call atexit() directly. Here we use a function ponter to
+// switch out its behaviour.
+// An example of where this is needed is the asan_dynamic runtime on MinGW-w64.
+// On this environment, __asan_init is called during global constructor phase,
+// way after calling the .CRT$XID initializer.
+static int (*volatile queueOrCallAtExit)(void (*)(void)) = &queueAtexit;
+
+int Atexit(void (*function)(void)) { return queueOrCallAtExit(function); }
+
 static int RunAtexit() {
   TraceLoggingUnregister(g_asan_provider);
+  queueOrCallAtExit = &atexit;
   int ret = 0;
   for (uptr i = 0; i < atexit_functions.size(); ++i) {
     ret |= atexit(atexit_functions[i]);
@@ -959,8 +992,13 @@ void SignalContext::InitPcSpBp() {
   sp = (uptr)context_record->Rsp;
 #    endif
 #  else
+#    if SANITIZER_ARM
+  bp = (uptr)context_record->R11;
+  sp = (uptr)context_record->Sp;
+#    else
   bp = (uptr)context_record->Ebp;
   sp = (uptr)context_record->Esp;
+#    endif
 #  endif
 }
 
@@ -1082,10 +1120,6 @@ void CheckVMASize() {
 
 void InitializePlatformEarly() {
   // Do nothing.
-}
-
-void MaybeReexec() {
-  // No need to re-exec on Windows.
 }
 
 void CheckASLR() {

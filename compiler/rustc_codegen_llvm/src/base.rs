@@ -11,13 +11,7 @@
 //! [`Ty`]: rustc_middle::ty::Ty
 //! [`val_ty`]: crate::common::val_ty
 
-use super::ModuleLlvm;
-
-use crate::attributes;
-use crate::builder::Builder;
-use crate::context::CodegenCx;
-use crate::llvm;
-use crate::value::Value;
+use std::time::Instant;
 
 use rustc_codegen_ssa::base::maybe_create_entry_wrapper;
 use rustc_codegen_ssa::mono_item::MonoItemExt;
@@ -32,9 +26,13 @@ use rustc_session::config::DebugInfo;
 use rustc_span::symbol::Symbol;
 use rustc_target::spec::SanitizerSet;
 
-use std::time::Instant;
+use super::ModuleLlvm;
+use crate::builder::Builder;
+use crate::context::CodegenCx;
+use crate::value::Value;
+use crate::{attributes, llvm};
 
-pub struct ValueIter<'ll> {
+pub(crate) struct ValueIter<'ll> {
     cur: Option<&'ll Value>,
     step: unsafe extern "C" fn(&'ll Value) -> Option<&'ll Value>,
 }
@@ -51,11 +49,14 @@ impl<'ll> Iterator for ValueIter<'ll> {
     }
 }
 
-pub fn iter_globals(llmod: &llvm::Module) -> ValueIter<'_> {
+pub(crate) fn iter_globals(llmod: &llvm::Module) -> ValueIter<'_> {
     unsafe { ValueIter { cur: llvm::LLVMGetFirstGlobal(llmod), step: llvm::LLVMGetNextGlobal } }
 }
 
-pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen<ModuleLlvm>, u64) {
+pub(crate) fn compile_codegen_unit(
+    tcx: TyCtxt<'_>,
+    cgu_name: Symbol,
+) -> (ModuleCodegen<ModuleLlvm>, u64) {
     let start_time = Instant::now();
 
     let dep_node = tcx.codegen_unit(cgu_name).codegen_dep_node(tcx);
@@ -74,17 +75,18 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
 
     fn module_codegen(tcx: TyCtxt<'_>, cgu_name: Symbol) -> ModuleCodegen<ModuleLlvm> {
         let cgu = tcx.codegen_unit(cgu_name);
-        let _prof_timer = tcx.prof.generic_activity_with_args(
-            "codegen_module",
-            &[cgu_name.to_string(), cgu.size_estimate().to_string()],
-        );
+        let _prof_timer =
+            tcx.prof.generic_activity_with_arg_recorder("codegen_module", |recorder| {
+                recorder.record_arg(cgu_name.to_string());
+                recorder.record_arg(cgu.size_estimate().to_string());
+            });
         // Instantiate monomorphizations without filling out definitions yet...
         let llvm_module = ModuleLlvm::new(tcx, cgu_name.as_str());
         {
             let cx = CodegenCx::new(tcx, cgu, &llvm_module);
             let mono_items = cx.codegen_unit.items_in_deterministic_order(cx.tcx);
-            for &(mono_item, (linkage, visibility)) in &mono_items {
-                mono_item.predefine::<Builder<'_, '_, '_>>(&cx, linkage, visibility);
+            for &(mono_item, data) in &mono_items {
+                mono_item.predefine::<Builder<'_, '_, '_>>(&cx, data.linkage, data.visibility);
             }
 
             // ... and now that we have everything pre-defined, fill out those definitions.
@@ -95,16 +97,8 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
             // If this codegen unit contains the main function, also create the
             // wrapper here
             if let Some(entry) = maybe_create_entry_wrapper::<Builder<'_, '_, '_>>(&cx) {
-                attributes::sanitize(&cx, SanitizerSet::empty(), entry);
-            }
-
-            // Run replace-all-uses-with for statics that need it
-            for &(old_g, new_g) in cx.statics_to_rauw().borrow().iter() {
-                unsafe {
-                    let bitcast = llvm::LLVMConstPointerCast(new_g, cx.val_ty(old_g));
-                    llvm::LLVMReplaceAllUsesWith(old_g, bitcast);
-                    llvm::LLVMDeleteGlobal(old_g);
-                }
+                let attrs = attributes::sanitize_attrs(&cx, SanitizerSet::empty());
+                attributes::apply_to_llfn(entry, llvm::AttributePlace::Function, &attrs);
             }
 
             // Finalize code coverage by injecting the coverage map. Note, the coverage map will
@@ -114,11 +108,23 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
             }
 
             // Create the llvm.used and llvm.compiler.used variables.
-            if !cx.used_statics().borrow().is_empty() {
-                cx.create_used_variable()
+            if !cx.used_statics.borrow().is_empty() {
+                cx.create_used_variable_impl(c"llvm.used", &*cx.used_statics.borrow());
             }
-            if !cx.compiler_used_statics().borrow().is_empty() {
-                cx.create_compiler_used_variable()
+            if !cx.compiler_used_statics.borrow().is_empty() {
+                cx.create_used_variable_impl(
+                    c"llvm.compiler.used",
+                    &*cx.compiler_used_statics.borrow(),
+                );
+            }
+
+            // Run replace-all-uses-with for statics that need it. This must
+            // happen after the llvm.used variables are created.
+            for &(old_g, new_g) in cx.statics_to_rauw().borrow().iter() {
+                unsafe {
+                    llvm::LLVMReplaceAllUsesWith(old_g, new_g);
+                    llvm::LLVMDeleteGlobal(old_g);
+                }
             }
 
             // Finalize debuginfo
@@ -137,18 +143,15 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
     (module, cost)
 }
 
-pub fn set_link_section(llval: &Value, attrs: &CodegenFnAttrs) {
-    let sect = match attrs.link_section {
-        Some(name) => name,
-        None => return,
-    };
+pub(crate) fn set_link_section(llval: &Value, attrs: &CodegenFnAttrs) {
+    let Some(sect) = attrs.link_section else { return };
     unsafe {
         let buf = SmallCStr::new(sect.as_str());
         llvm::LLVMSetSection(llval, buf.as_ptr());
     }
 }
 
-pub fn linkage_to_llvm(linkage: Linkage) -> llvm::Linkage {
+pub(crate) fn linkage_to_llvm(linkage: Linkage) -> llvm::Linkage {
     match linkage {
         Linkage::External => llvm::Linkage::ExternalLinkage,
         Linkage::AvailableExternally => llvm::Linkage::AvailableExternallyLinkage,
@@ -164,7 +167,7 @@ pub fn linkage_to_llvm(linkage: Linkage) -> llvm::Linkage {
     }
 }
 
-pub fn visibility_to_llvm(linkage: Visibility) -> llvm::Visibility {
+pub(crate) fn visibility_to_llvm(linkage: Visibility) -> llvm::Visibility {
     match linkage {
         Visibility::Default => llvm::Visibility::Default,
         Visibility::Hidden => llvm::Visibility::Hidden,

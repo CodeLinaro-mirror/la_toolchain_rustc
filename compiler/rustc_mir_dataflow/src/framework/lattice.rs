@@ -26,7 +26,7 @@
 //! ## `PartialOrd`
 //!
 //! Given that they represent partially ordered sets, you may be surprised that [`JoinSemiLattice`]
-//! and [`MeetSemiLattice`] do not have [`PartialOrd`][std::cmp::PartialOrd] as a supertrait. This
+//! and [`MeetSemiLattice`] do not have [`PartialOrd`] as a supertrait. This
 //! is because most standard library types use lexicographic ordering instead of set inclusion for
 //! their `PartialOrd` impl. Since we do not actually need to compare lattice elements to run a
 //! dataflow analysis, there's no need for a newtype wrapper with a custom `PartialOrd` impl. The
@@ -38,9 +38,12 @@
 //! [Hasse diagram]: https://en.wikipedia.org/wiki/Hasse_diagram
 //! [poset]: https://en.wikipedia.org/wiki/Partially_ordered_set
 
-use rustc_index::bit_set::BitSet;
-use rustc_index::vec::{Idx, IndexVec};
 use std::iter;
+
+use rustc_index::bit_set::{BitSet, ChunkedBitSet, HybridBitSet};
+use rustc_index::{Idx, IndexVec};
+
+use crate::framework::BitSetExt;
 
 /// A [partially ordered set][poset] that has a [least upper bound][lub] for any pair of elements
 /// in the set.
@@ -72,6 +75,18 @@ pub trait MeetSemiLattice: Eq {
     fn meet(&mut self, other: &Self) -> bool;
 }
 
+/// A set that has a "bottom" element, which is less than or equal to any other element.
+pub trait HasBottom {
+    const BOTTOM: Self;
+
+    fn is_bottom(&self) -> bool;
+}
+
+/// A set that has a "top" element, which is greater than or equal to any other element.
+pub trait HasTop {
+    const TOP: Self;
+}
+
 /// A `bool` is a "two-point" lattice with `true` as the top element and `false` as the bottom:
 ///
 /// ```text
@@ -99,6 +114,18 @@ impl MeetSemiLattice for bool {
 
         false
     }
+}
+
+impl HasBottom for bool {
+    const BOTTOM: Self = false;
+
+    fn is_bottom(&self) -> bool {
+        !self
+    }
+}
+
+impl HasTop for bool {
+    const TOP: Self = true;
 }
 
 /// A tuple (or list) of lattices is itself a lattice whose least upper bound is the concatenation
@@ -145,6 +172,18 @@ impl<T: Idx> MeetSemiLattice for BitSet<T> {
     }
 }
 
+impl<T: Idx> JoinSemiLattice for ChunkedBitSet<T> {
+    fn join(&mut self, other: &Self) -> bool {
+        self.union(other)
+    }
+}
+
+impl<T: Idx> MeetSemiLattice for ChunkedBitSet<T> {
+    fn meet(&mut self, other: &Self) -> bool {
+        self.intersect(other)
+    }
+}
+
 /// The counterpart of a given semilattice `T` using the [inverse order].
 ///
 /// The dual of a join-semilattice is a meet-semilattice and vice versa. For example, the dual of a
@@ -155,15 +194,17 @@ impl<T: Idx> MeetSemiLattice for BitSet<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dual<T>(pub T);
 
-impl<T> std::borrow::Borrow<T> for Dual<T> {
-    fn borrow(&self) -> &T {
-        &self.0
+impl<T: Idx> BitSetExt<T> for Dual<BitSet<T>> {
+    fn contains(&self, elem: T) -> bool {
+        self.0.contains(elem)
     }
-}
 
-impl<T> std::borrow::BorrowMut<T> for Dual<T> {
-    fn borrow_mut(&mut self) -> &mut T {
-        &mut self.0
+    fn union(&mut self, other: &HybridBitSet<T>) {
+        self.0.union(other);
+    }
+
+    fn subtract(&mut self, other: &HybridBitSet<T>) {
+        self.0.subtract(other);
     }
 }
 
@@ -180,14 +221,16 @@ impl<T: JoinSemiLattice> MeetSemiLattice for Dual<T> {
 }
 
 /// Extends a type `T` with top and bottom elements to make it a partially ordered set in which no
-/// value of `T` is comparable with any other. A flat set has the following [Hasse diagram]:
+/// value of `T` is comparable with any other.
+///
+/// A flat set has the following [Hasse diagram]:
 ///
 /// ```text
-///         top
-///       / /  \ \
+///          top
+///  / ... / /  \ \ ... \
 /// all possible values of `T`
-///       \ \  / /
-///        bottom
+///  \ ... \ \  / / ... /
+///         bottom
 /// ```
 ///
 /// [Hasse diagram]: https://en.wikipedia.org/wiki/Hasse_diagram
@@ -227,5 +270,111 @@ impl<T: Clone + Eq> MeetSemiLattice for FlatSet<T> {
 
         *self = result;
         true
+    }
+}
+
+impl<T> HasBottom for FlatSet<T> {
+    const BOTTOM: Self = Self::Bottom;
+
+    fn is_bottom(&self) -> bool {
+        matches!(self, Self::Bottom)
+    }
+}
+
+impl<T> HasTop for FlatSet<T> {
+    const TOP: Self = Self::Top;
+}
+
+/// Extend a lattice with a bottom value to represent an unreachable execution.
+///
+/// The only useful action on an unreachable state is joining it with a reachable one to make it
+/// reachable. All other actions, gen/kill for instance, are no-ops.
+#[derive(PartialEq, Eq, Debug)]
+pub enum MaybeReachable<T> {
+    Unreachable,
+    Reachable(T),
+}
+
+impl<T> MaybeReachable<T> {
+    pub fn is_reachable(&self) -> bool {
+        matches!(self, MaybeReachable::Reachable(_))
+    }
+}
+
+impl<T> HasBottom for MaybeReachable<T> {
+    const BOTTOM: Self = MaybeReachable::Unreachable;
+
+    fn is_bottom(&self) -> bool {
+        matches!(self, Self::Unreachable)
+    }
+}
+
+impl<T: HasTop> HasTop for MaybeReachable<T> {
+    const TOP: Self = MaybeReachable::Reachable(T::TOP);
+}
+
+impl<S> MaybeReachable<S> {
+    /// Return whether the current state contains the given element. If the state is unreachable,
+    /// it does no contain anything.
+    pub fn contains<T>(&self, elem: T) -> bool
+    where
+        S: BitSetExt<T>,
+    {
+        match self {
+            MaybeReachable::Unreachable => false,
+            MaybeReachable::Reachable(set) => set.contains(elem),
+        }
+    }
+}
+
+impl<T, S: BitSetExt<T>> BitSetExt<T> for MaybeReachable<S> {
+    fn contains(&self, elem: T) -> bool {
+        self.contains(elem)
+    }
+
+    fn union(&mut self, other: &HybridBitSet<T>) {
+        match self {
+            MaybeReachable::Unreachable => {}
+            MaybeReachable::Reachable(set) => set.union(other),
+        }
+    }
+
+    fn subtract(&mut self, other: &HybridBitSet<T>) {
+        match self {
+            MaybeReachable::Unreachable => {}
+            MaybeReachable::Reachable(set) => set.subtract(other),
+        }
+    }
+}
+
+impl<V: Clone> Clone for MaybeReachable<V> {
+    fn clone(&self) -> Self {
+        match self {
+            MaybeReachable::Reachable(x) => MaybeReachable::Reachable(x.clone()),
+            MaybeReachable::Unreachable => MaybeReachable::Unreachable,
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        match (&mut *self, source) {
+            (MaybeReachable::Reachable(x), MaybeReachable::Reachable(y)) => {
+                x.clone_from(y);
+            }
+            _ => *self = source.clone(),
+        }
+    }
+}
+
+impl<T: JoinSemiLattice + Clone> JoinSemiLattice for MaybeReachable<T> {
+    fn join(&mut self, other: &Self) -> bool {
+        // Unreachable acts as a bottom.
+        match (&mut *self, &other) {
+            (_, MaybeReachable::Unreachable) => false,
+            (MaybeReachable::Unreachable, _) => {
+                *self = other.clone();
+                true
+            }
+            (MaybeReachable::Reachable(this), MaybeReachable::Reachable(other)) => this.join(other),
+        }
     }
 }

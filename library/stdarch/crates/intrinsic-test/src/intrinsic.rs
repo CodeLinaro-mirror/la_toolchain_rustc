@@ -1,3 +1,4 @@
+use crate::format::Indentation;
 use crate::types::{IntrinsicType, TypeKind};
 
 use super::argument::ArgumentList;
@@ -20,8 +21,9 @@ pub struct Intrinsic {
 
 impl Intrinsic {
     /// Generates a std::cout for the intrinsics results that will match the
-    /// rust debug output format for the return type.
-    pub fn print_result_c(&self, index: usize, additional: &str) -> String {
+    /// rust debug output format for the return type. The generated line assumes
+    /// there is an int i in scope which is the current pass number.
+    pub fn print_result_c(&self, indentation: Indentation, additional: &str) -> String {
         let lanes = if self.results.num_vectors() > 1 {
             (0..self.results.num_vectors())
                 .map(|vector| {
@@ -72,7 +74,7 @@ impl Intrinsic {
         };
 
         format!(
-            r#"std::cout << "Result {additional}-{idx}: {ty}" << std::fixed << std::setprecision(150) <<  {lanes} << "{close}" << std::endl;"#,
+            r#"{indentation}std::cout << "Result {additional}-" << i+1 << ": {ty}" << std::fixed << std::setprecision(150) <<  {lanes} << "{close}" << std::endl;"#,
             ty = if self.results.is_simd() {
                 format!("{}(", self.results.c_type())
             } else {
@@ -81,45 +83,60 @@ impl Intrinsic {
             close = if self.results.is_simd() { ")" } else { "" },
             lanes = lanes,
             additional = additional,
-            idx = index,
         )
     }
 
-    pub fn generate_pass_rust(&self, index: usize, additional: &str) -> String {
+    pub fn generate_loop_c(
+        &self,
+        indentation: Indentation,
+        additional: &str,
+        passes: u32,
+        p64_armv7_workaround: bool,
+    ) -> String {
+        let body_indentation = indentation.nested();
+        format!(
+            "{indentation}for (int i=0; i<{passes}; i++) {{\n\
+                {loaded_args}\
+                {body_indentation}auto __return_value = {intrinsic_call}({args});\n\
+                {print_result}\n\
+            {indentation}}}",
+            loaded_args = self
+                .arguments
+                .load_values_c(body_indentation, p64_armv7_workaround),
+            intrinsic_call = self.name,
+            args = self.arguments.as_call_param_c(),
+            print_result = self.print_result_c(body_indentation, additional)
+        )
+    }
+
+    pub fn generate_loop_rust(
+        &self,
+        indentation: Indentation,
+        additional: &str,
+        passes: u32,
+    ) -> String {
         let constraints = self.arguments.as_constraint_parameters_rust();
         let constraints = if !constraints.is_empty() {
-            format!("::<{}>", constraints)
+            format!("::<{constraints}>")
         } else {
             constraints
         };
 
+        let indentation2 = indentation.nested();
+        let indentation3 = indentation2.nested();
         format!(
-            r#"
-    unsafe {{
-        {initialized_args}
-        let res = {intrinsic_call}{const}({args});
-        println!("Result {additional}-{idx}: {{:.150?}}", res);
-    }}"#,
-            initialized_args = self.arguments.init_random_values_rust(index),
+            "{indentation}for i in 0..{passes} {{\n\
+                {indentation2}unsafe {{\n\
+                    {loaded_args}\
+                    {indentation3}let __return_value = {intrinsic_call}{const}({args});\n\
+                    {indentation3}println!(\"Result {additional}-{{}}: {{:.150?}}\", i + 1, __return_value);\n\
+                {indentation2}}}\n\
+            {indentation}}}",
+            loaded_args = self.arguments.load_values_rust(indentation3),
             intrinsic_call = self.name,
+            const = constraints,
             args = self.arguments.as_call_param_rust(),
             additional = additional,
-            idx = index,
-            const = constraints,
-        )
-    }
-
-    pub fn generate_pass_c(&self, index: usize, additional: &str) -> String {
-        format!(
-            r#"  {{
-    {initialized_args}
-    auto __return_value = {intrinsic_call}({args});
-    {print_result}
-  }}"#,
-            initialized_args = self.arguments.init_random_values_c(index),
-            intrinsic_call = self.name,
-            args = self.arguments.as_call_param_c(),
-            print_result = self.print_result_c(index, additional)
         )
     }
 }

@@ -45,12 +45,17 @@ Safe Rust must never result in undefined behavior so non-reentrant functions
 must be marked as `unsafe`. Yet I just told that `exception` handlers can safely
 use `static mut` variables. How is this possible? This is possible because
 `exception` handlers can *not* be called by software thus reentrancy is not
-possible.
+possible. These handlers are called by the hardware itself which is assumed to be physically non-concurrent.
+
+As a result, in the context of exception handlers in embedded systems, the absence of concurrent invocations of the same handler ensures that there are no reentrancy issues, even if the handler uses static mutable variables.  
+
+In a multicore system, where multiple processor cores are executing code concurrently, the potential for reentrancy issues becomes relevant again, even within exception handlers. While each core may have its own set of exception handlers, there can still be scenarios where multiple cores attempt to execute the same exception handler simultaneously.  
+To address this concern in a multicore environment, proper synchronization mechanisms need to be employed within the exception handlers to ensure that access to shared resources is properly coordinated among the cores. This typically involves the use of techniques such as locks, semaphores, or atomic operations to prevent data races and maintain data integrity
 
 > Note that the `exception` attribute transforms definitions of static variables
 > inside the function by wrapping them into `unsafe` blocks and providing us
 > with new appropriate variables of type `&mut` of the same name.
-> Thus we can derefence the reference via `*` to access the values of the variables without
+> Thus we can dereference the reference via `*` to access the values of the variables without
 > needing to wrap them in an `unsafe` block.
 
 ## A complete example
@@ -208,7 +213,7 @@ use cortex_m_semihosting::hio;
 fn main() -> ! {
     // read a nonexistent memory location
     unsafe {
-        ptr::read_volatile(0x3FFF_FFFE as *const u32);
+        ptr::read_volatile(0x3FFF_0000 as *const u32);
     }
 
     loop {}
@@ -231,14 +236,14 @@ you'll see something like this on the OpenOCD console.
 $ openocd
 (..)
 ExceptionFrame {
-    r0: 0x3ffffffe,
-    r1: 0x00f00000,
-    r2: 0x20000000,
+    r0: 0x3fff0000,
+    r1: 0x00000003,
+    r2: 0x080032e8,
     r3: 0x00000000,
     r12: 0x00000000,
-    lr: 0x080008f7,
-    pc: 0x0800094a,
-    xpsr: 0x61000000
+    lr: 0x080016df,
+    pc: 0x080016e2,
+    xpsr: 0x61000000,
 }
 ```
 
@@ -258,7 +263,7 @@ ResetTrampoline:
  800094c:       b       #-0x4 <ResetTrampoline+0xa>
 ```
 
-You can lookup the value of the program counter `0x0800094a` in the dissassembly.
+You can lookup the value of the program counter `0x0800094a` in the disassembly.
 You'll see that a load operation (`ldr r0, [r0]` ) caused the exception.
 The `r0` field of `ExceptionFrame` will tell you the value of register `r0`
 was `0x3fff_fffe` at that time.

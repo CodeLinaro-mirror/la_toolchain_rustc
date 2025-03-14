@@ -2,7 +2,7 @@
 
 ## NAME
 
-cargo-vendor - Vendor all dependencies locally
+cargo-vendor --- Vendor all dependencies locally
 
 ## SYNOPSIS
 
@@ -16,8 +16,16 @@ the vendor directory specified by `<path>` will contain all remote sources from
 dependencies specified. Additional manifests beyond the default one can be
 specified with the `-s` option.
 
-The `cargo vendor` command will also print out the configuration necessary
-to use the vendored sources, which you will need to add to `.cargo/config.toml`.
+The configuration necessary to use the vendored sources would be printed to
+stdout after `cargo vendor` completes the vendoring process.
+You will need to add or redirect it to your Cargo configuration file,
+which is usually `.cargo/config.toml` locally for the current package.
+
+Cargo treats vendored sources as read-only as it does to registry and git sources.
+If you intend to modify a crate from a remote source,
+use `[patch]` or a `path` dependency pointing to a local copy of that crate.
+Cargo will then correctly handle the crate on incremental rebuilds,
+as it knows that it is no longer a read-only dependency.
 
 ## OPTIONS
 
@@ -26,8 +34,8 @@ to use the vendored sources, which you will need to add to `.cargo/config.toml`.
 {{#options}}
 
 {{#option "`-s` _manifest_" "`--sync` _manifest_" }}
-Specify extra `Cargo.toml` manifests to workspaces which should also be
-vendored and synced to the output.
+Specify an extra `Cargo.toml` manifest to workspaces which should also be
+vendored and synced to the output. May be specified multiple times.
 {{/option}}
 
 {{#option "`--no-delete`" }}
@@ -58,6 +66,8 @@ only a subset of the packages have changed.
 
 {{> options-locked }}
 
+{{> options-lockfile-path }}
+
 {{/options}}
 
 ### Display Options
@@ -87,6 +97,10 @@ only a subset of the packages have changed.
 3. Vendor the current workspace as well as another to "vendor"
 
        cargo vendor -s ../path/to/Cargo.toml
+
+4. Vendor and redirect the necessary vendor configs to a config file.
+
+       cargo vendor > path/to/my/cargo/config.toml
 
 ## SEE ALSO
 {{man "cargo" 1}}

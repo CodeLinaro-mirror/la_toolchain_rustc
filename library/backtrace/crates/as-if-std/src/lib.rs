@@ -9,12 +9,14 @@ extern crate alloc;
 
 // We want to `pub use std::*` in the root but we don't want `std` available in
 // the root namespace, so do this in a funky inner module.
+#[allow(unused_imports)]
 mod __internal {
     extern crate std;
     pub use std::*;
 }
 
-pub use __internal::*;
+#[allow(unused_imports)]
+use __internal::*;
 
 // This is the magical part which we hope works.
 #[path = "../../../src/lib.rs"]

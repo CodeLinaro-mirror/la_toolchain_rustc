@@ -5,8 +5,8 @@
 Defined in the `specialize` module.
 
 The basic strategy is to build up a *specialization graph* during
-coherence checking (recall that coherence checking looks for overlapping
-impls). Insertion into the graph locates the right place
+coherence checking (coherence checking looks for [overlapping impls](../coherence.md)). 
+Insertion into the graph locates the right place
 to put an impl in the specialization hierarchy; if there is no right
 place (due to partial overlap but no containment), you get an overlap
 error. Specialization is consulted when selecting an impl (of course),
@@ -36,7 +36,7 @@ as long as they are part of the same specialization family. In that
 case, it returns a *single* impl on success – this is the most
 specialized impl *known* to apply. However, if there are any inference
 variables in play, the returned impl may not be the actual impl we
-will use at trans time. Thus, we take special care to avoid projecting
+will use at codegen time. Thus, we take special care to avoid projecting
 associated types unless either (1) the associated type does not use
 `default` and thus cannot be overridden or (2) all input types are
 known concretely.

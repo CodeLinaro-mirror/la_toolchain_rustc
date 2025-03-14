@@ -58,11 +58,12 @@ The story is a bit different for `type_check_item(foo)`: We again walk the
 edges and already know that `type_of(foo)` is fine. Then we get to
 `type_of(bar)` which we have not checked yet, so we walk the edges of
 `type_of(bar)` and encounter `Hir(bar)` which *has* changed. Consequently
-the result of `type_of(bar)` might yield a different same result than what we
+the result of `type_of(bar)` might yield a different result than what we
 have in the cache and, transitively, the result of `type_check_item(foo)`
 might have changed too. We thus re-run `type_check_item(foo)`, which in
 turn will re-run `type_of(bar)`, which will yield an up-to-date result
-because it reads the up-to-date version of `Hir(bar)`.
+because it reads the up-to-date version of `Hir(bar)`. Also, we re-run
+`type_check_item(bar)` because result of `type_of(bar)` might have changed.
 
 
 ## The Problem With The Basic Algorithm: False Positives
@@ -175,17 +176,19 @@ fn try_mark_green(tcx, current_node) -> bool {
 
     true
 }
-
-// Note: The actual implementation can be found in
-//       compiler/rustc_middle/src/dep_graph/graph.rs
 ```
+
+> NOTE:
+> The actual implementation can be found in
+> [`compiler/rustc_query_system/src/dep_graph/graph.rs`][try_mark_green]
 
 By using red-green marking we can avoid the devastating cumulative effect of
 having false positives during change detection. Whenever a query is executed
 in incremental mode, we first check if its already green. If not, we run
 `try_mark_green()` on it. If it still isn't green after that, then we actually
-invoke the query provider to re-compute the result.
-
+invoke the query provider to re-compute the result. Re-computing the query might 
+then itself involve recursively invoking more queries, which can mean we come back
+to the `try_mark_green()` algorithm for the dependencies recursively.
 
 
 ## The Real World: How Persistence Makes Everything Complicated
@@ -329,7 +332,7 @@ up its dependencies (i.e. also dep-nodes in the previous graph) and continue wit
 the rest of the try-mark-green algorithm. The next interesting thing happens
 when we successfully marked the node as green. At that point we copy the node
 and the edges to its dependencies from the old graph into the new graph. We
-have to do this because the new dep-graph cannot not acquire the
+have to do this because the new dep-graph cannot acquire the
 node and edges via the regular dependency tracking. The tracking system can
 only record edges while actually running a query -- but running the query,
 although we have the result already cached, is exactly what we want to avoid.
@@ -528,10 +531,10 @@ session. The overhead of doing so is a few percent of total compilation time.
 
 Data structures used as query results could be factored in a way that removes
 edges from the dependency graph. Especially "span" information is very volatile,
-so including it in query result will increase the chance that that result won't
+so including it in query result will increase the chance that the result won't
 be reusable. See <https://github.com/rust-lang/rust/issues/47389> for more
 information.
 
 
-
 [query-model]: ./query-evaluation-model-in-detail.html
+[try_mark_green]: https://doc.rust-lang.org/nightly/nightly-rustc/src/rustc_query_system/dep_graph/graph.rs.html

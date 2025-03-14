@@ -2,7 +2,7 @@
 
 ## NAME
 
-cargo-pkgid - Print a fully qualified package specification
+cargo-pkgid --- Print a fully qualified package specification
 
 ## SYNOPSIS
 
@@ -21,17 +21,21 @@ fetched.
 
 A package specifier consists of a name, version, and source URL. You are
 allowed to use partial specifiers to succinctly match a specific package as
-long as it matches only one package. The format of a _spec_ can be one of the
-following:
+long as it matches only one package. This specifier is also used by other parts
+in Cargo, such as {{man "cargo-metadata" 1}} and [JSON messages] emitted by Cargo.
+
+The format of a _spec_ can be one of the following:
 
 SPEC Structure             | Example SPEC
 ---------------------------|--------------
 _name_                     | `bitflags`
-_name_`:`_version_         | `bitflags:1.0.4`
+_name_`@`_version_         | `bitflags@1.0.4`
 _url_                      | `https://github.com/rust-lang/cargo`
 _url_`#`_version_          | `https://github.com/rust-lang/cargo#0.33.0`
 _url_`#`_name_             | `https://github.com/rust-lang/crates.io-index#bitflags`
-_url_`#`_name_`:`_version_ | `https://github.com/rust-lang/cargo#crates-io:0.21.0`
+_url_`#`_name_`@`_version_ | `https://github.com/rust-lang/cargo#crates-io@0.21.0`
+
+The specification grammar can be found in chapter [Package ID Specifications].
 
 ## OPTIONS
 
@@ -59,6 +63,8 @@ Get the package ID for the given package instead of the current package.
 
 {{> options-locked }}
 
+{{> options-lockfile-path }}
+
 {{/options}}
 
 {{> section-options-common }}
@@ -75,7 +81,7 @@ Get the package ID for the given package instead of the current package.
 
 2. Retrieve package specification for version 1.0.0 of `foo`:
 
-       cargo pkgid foo:1.0.0
+       cargo pkgid foo@1.0.0
 
 3. Retrieve package specification for `foo` from crates.io:
 
@@ -86,4 +92,9 @@ Get the package ID for the given package instead of the current package.
        cargo pkgid file:///path/to/local/package#foo
 
 ## SEE ALSO
-{{man "cargo" 1}}, {{man "cargo-generate-lockfile" 1}}, {{man "cargo-metadata" 1}}
+
+{{man "cargo" 1}}, {{man "cargo-generate-lockfile" 1}}, {{man "cargo-metadata" 1}},
+[Package ID Specifications], [JSON messages]
+
+[Package ID Specifications]: ../reference/pkgid-spec.html
+[JSON messages]: ../reference/external-tools.html#json-messages

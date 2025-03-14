@@ -6,7 +6,7 @@ use crate::core::dependency::DepKind;
 use crate::core::resolver::features::{CliFeatures, FeaturesFor, ResolvedFeatures};
 use crate::core::resolver::Resolve;
 use crate::core::{FeatureMap, FeatureValue, Package, PackageId, PackageIdSpec, Workspace};
-use crate::util::interning::InternedString;
+use crate::util::interning::{InternedString, INTERNED_DEFAULT};
 use crate::util::CargoResult;
 use std::collections::{HashMap, HashSet};
 
@@ -233,9 +233,33 @@ impl<'a> Graph<'a> {
 
         let mut dupes: Vec<(&Node, usize)> = packages
             .into_iter()
-            .filter(|(_name, indexes)| indexes.len() > 1)
+            .filter(|(_name, indexes)| {
+                indexes
+                    .into_iter()
+                    .map(|(node, _)| {
+                        match node {
+                            Node::Package {
+                                package_id,
+                                features,
+                                ..
+                            } => {
+                                // Do not treat duplicates on the host or target as duplicates.
+                                Node::Package {
+                                    package_id: package_id.clone(),
+                                    features: features.clone(),
+                                    kind: CompileKind::Host,
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    })
+                    .collect::<HashSet<_>>()
+                    .len()
+                    > 1
+            })
             .flat_map(|(_name, indexes)| indexes)
             .collect();
+
         // For consistent output.
         dupes.sort_unstable();
         dupes.into_iter().map(|(_node, i)| i).collect()
@@ -301,6 +325,7 @@ fn add_pkg(
     let node_features = resolved_features.activated_features(package_id, features_for);
     let node_kind = match features_for {
         FeaturesFor::HostDep => CompileKind::Host,
+        FeaturesFor::ArtifactDep(target) => CompileKind::Target(target),
         FeaturesFor::NormalOrDev => requested_kind,
     };
     let node = Node::Package {
@@ -335,6 +360,10 @@ fn add_pkg(
                 }
                 // Filter out dev-dependencies if requested.
                 if !opts.edge_kinds.contains(&EdgeKind::Dep(dep.kind())) {
+                    return false;
+                }
+                // Filter out proc-macrcos if requested.
+                if opts.no_proc_macro && graph.package_for_id(dep_id).proc_macro() {
                     return false;
                 }
                 if dep.is_optional() {
@@ -386,7 +415,7 @@ fn add_pkg(
                 if dep.uses_default_features() {
                     add_feature(
                         graph,
-                        InternedString::new("default"),
+                        INTERNED_DEFAULT,
                         Some(from_index),
                         dep_index,
                         EdgeKind::Dep(dep.kind()),
@@ -476,7 +505,7 @@ fn add_cli_features(
     }
 
     if cli_features.uses_default_features {
-        to_add.insert(FeatureValue::Feature(InternedString::new("default")));
+        to_add.insert(FeatureValue::Feature(INTERNED_DEFAULT));
     }
     to_add.extend(cli_features.features.iter().cloned());
 
@@ -569,9 +598,8 @@ fn add_feature_rec(
     package_index: usize,
 ) {
     let feature_map = resolve.summary(package_id).features();
-    let fvs = match feature_map.get(&feature_name) {
-        Some(fvs) => fvs,
-        None => return,
+    let Some(fvs) = feature_map.get(&feature_name) else {
+        return;
     };
     for fv in fvs {
         match fv {
@@ -613,7 +641,7 @@ fn add_feature_rec(
                 let dep_indexes = match graph.dep_name_map[&package_index].get(dep_name) {
                     Some(indexes) => indexes.clone(),
                     None => {
-                        log::debug!(
+                        tracing::debug!(
                             "enabling feature {} on {}, found {}/{}, \
                              dep appears to not be enabled",
                             feature_name,

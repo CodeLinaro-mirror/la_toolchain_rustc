@@ -1,80 +1,16 @@
 //! Tests for dep-info files. This includes the dep-info file Cargo creates in
 //! the output directory, and the ones stored in the fingerprint.
 
-use cargo_test_support::compare::assert_match_exact;
-use cargo_test_support::paths::{self, CargoPathExt};
-use cargo_test_support::registry::Package;
-use cargo_test_support::{
-    basic_bin_manifest, basic_manifest, is_nightly, main_file, project, rustc_host, Project,
-};
-use filetime::FileTime;
-use std::convert::TryInto;
-use std::fs;
 use std::path::Path;
-use std::str;
 
-// Helper for testing dep-info files in the fingerprint dir.
-#[track_caller]
-fn assert_deps(project: &Project, fingerprint: &str, test_cb: impl Fn(&Path, &[(u8, &str)])) {
-    let mut files = project
-        .glob(fingerprint)
-        .map(|f| f.expect("unwrap glob result"))
-        // Filter out `.json` entries.
-        .filter(|f| f.extension().is_none());
-    let info_path = files
-        .next()
-        .unwrap_or_else(|| panic!("expected 1 dep-info file at {}, found 0", fingerprint));
-    assert!(files.next().is_none(), "expected only 1 dep-info file");
-    let dep_info = fs::read(&info_path).unwrap();
-    let dep_info = &mut &dep_info[..];
-    let deps = (0..read_usize(dep_info))
-        .map(|_| {
-            (
-                read_u8(dep_info),
-                str::from_utf8(read_bytes(dep_info)).unwrap(),
-            )
-        })
-        .collect::<Vec<_>>();
-    test_cb(&info_path, &deps);
-
-    fn read_usize(bytes: &mut &[u8]) -> usize {
-        let ret = &bytes[..4];
-        *bytes = &bytes[4..];
-
-        u32::from_le_bytes(ret.try_into().unwrap()) as usize
-    }
-
-    fn read_u8(bytes: &mut &[u8]) -> u8 {
-        let ret = bytes[0];
-        *bytes = &bytes[1..];
-        ret
-    }
-
-    fn read_bytes<'a>(bytes: &mut &'a [u8]) -> &'a [u8] {
-        let n = read_usize(bytes);
-        let ret = &bytes[..n];
-        *bytes = &bytes[n..];
-        ret
-    }
-}
-
-fn assert_deps_contains(project: &Project, fingerprint: &str, expected: &[(u8, &str)]) {
-    assert_deps(project, fingerprint, |info_path, entries| {
-        for (e_kind, e_path) in expected {
-            let pattern = glob::Pattern::new(e_path).unwrap();
-            let count = entries
-                .iter()
-                .filter(|(kind, path)| kind == e_kind && pattern.matches(path))
-                .count();
-            if count != 1 {
-                panic!(
-                    "Expected 1 match of {} {} in {:?}, got {}:\n{:#?}",
-                    e_kind, e_path, info_path, count, entries
-                );
-            }
-        }
-    })
-}
+use cargo_test_support::compare::assert_e2e;
+use cargo_test_support::paths;
+use cargo_test_support::prelude::*;
+use cargo_test_support::registry::Package;
+use cargo_test_support::str;
+use cargo_test_support::{assert_deps, assert_deps_contains};
+use cargo_test_support::{basic_bin_manifest, basic_manifest, main_file, project, rustc_host};
+use filetime::FileTime;
 
 #[cargo_test]
 fn build_dep_info() {
@@ -229,13 +165,8 @@ fn no_rewrite_if_no_change() {
     );
 }
 
-#[cargo_test]
+#[cargo_test(nightly, reason = "-Z binary-dep-depinfo is unstable")]
 fn relative_depinfo_paths_ws() {
-    if !is_nightly() {
-        // -Z binary-dep-depinfo is unstable (https://github.com/rust-lang/rust/issues/63012)
-        return;
-    }
-
     // Test relative dep-info paths in a workspace with --target with
     // proc-macros and other dependency kinds.
     Package::new("regdep", "0.1.0")
@@ -325,8 +256,12 @@ fn relative_depinfo_paths_ws() {
     let host = rustc_host();
     p.cargo("build -Z binary-dep-depinfo --target")
         .arg(&host)
-        .masquerade_as_nightly_cargo()
-        .with_stderr_contains("[COMPILING] foo [..]")
+        .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
+        .with_stderr_data(str![[r#"
+...
+[COMPILING] foo v0.1.0 ([ROOT]/foo/foo)
+...
+"#]])
         .run();
 
     assert_deps_contains(
@@ -362,18 +297,16 @@ fn relative_depinfo_paths_ws() {
     // Make sure it stays fresh.
     p.cargo("build -Z binary-dep-depinfo --target")
         .arg(&host)
-        .masquerade_as_nightly_cargo()
-        .with_stderr("[FINISHED] dev [..]")
+        .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
-#[cargo_test]
+#[cargo_test(nightly, reason = "-Z binary-dep-depinfo is unstable")]
 fn relative_depinfo_paths_no_ws() {
-    if !is_nightly() {
-        // -Z binary-dep-depinfo is unstable (https://github.com/rust-lang/rust/issues/63012)
-        return;
-    }
-
     // Test relative dep-info paths without a workspace with proc-macros and
     // other dependency kinds.
     Package::new("regdep", "0.1.0")
@@ -453,8 +386,12 @@ fn relative_depinfo_paths_no_ws() {
         .build();
 
     p.cargo("build -Z binary-dep-depinfo")
-        .masquerade_as_nightly_cargo()
-        .with_stderr_contains("[COMPILING] foo [..]")
+        .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
+        .with_stderr_data(str![[r#"
+...
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+...
+"#]])
         .run();
 
     assert_deps_contains(
@@ -489,8 +426,11 @@ fn relative_depinfo_paths_no_ws() {
 
     // Make sure it stays fresh.
     p.cargo("build -Z binary-dep-depinfo")
-        .masquerade_as_nightly_cargo()
-        .with_stderr("[FINISHED] dev [..]")
+        .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -516,7 +456,7 @@ fn reg_dep_source_not_tracked() {
         .file("src/lib.rs", "pub fn f() { regdep::f(); }")
         .build();
 
-    p.cargo("build").run();
+    p.cargo("check").run();
 
     assert_deps(
         &p,
@@ -534,12 +474,8 @@ fn reg_dep_source_not_tracked() {
     );
 }
 
-#[cargo_test]
+#[cargo_test(nightly, reason = "-Z binary-dep-depinfo is unstable")]
 fn canonical_path() {
-    if !is_nightly() {
-        // -Z binary-dep-depinfo is unstable (https://github.com/rust-lang/rust/issues/63012)
-        return;
-    }
     if !cargo_test_support::symlink_supported() {
         return;
     }
@@ -566,8 +502,8 @@ fn canonical_path() {
     real.mkdir_p();
     p.symlink(real, "target");
 
-    p.cargo("build -Z binary-dep-depinfo")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check -Z binary-dep-depinfo")
+        .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
         .run();
 
     assert_deps_contains(
@@ -585,7 +521,7 @@ fn non_local_build_script() {
             "build.rs",
             r#"
                 fn main() {
-                    println!("cargo:rerun-if-changed=build.rs");
+                    println!("cargo::rerun-if-changed=build.rs");
                 }
             "#,
         )
@@ -608,8 +544,11 @@ fn non_local_build_script() {
 
     p.cargo("build").run();
     let contents = p.read_file("target/debug/foo.d");
-    assert_match_exact(
-        "[ROOT]/foo/target/debug/foo[EXE]: [ROOT]/foo/src/main.rs",
+    assert_e2e().eq(
         &contents,
+        str![[r#"
+[ROOT]/foo/target/debug/foo[EXE]: [ROOT]/foo/src/main.rs
+
+"#]],
     );
 }

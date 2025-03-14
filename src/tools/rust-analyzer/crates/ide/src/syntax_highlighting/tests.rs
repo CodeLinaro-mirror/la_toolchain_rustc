@@ -2,23 +2,145 @@ use std::time::Instant;
 
 use expect_test::{expect_file, ExpectFile};
 use ide_db::SymbolKind;
+use span::Edition;
 use test_utils::{bench, bench_fixture, skip_slow_tests, AssertLinear};
 
-use crate::{fixture, FileRange, HlTag, TextRange};
+use crate::{fixture, FileRange, HighlightConfig, HlTag, TextRange};
 
+const HL_CONFIG: HighlightConfig = HighlightConfig {
+    strings: true,
+    punctuation: true,
+    specialize_punctuation: true,
+    specialize_operator: true,
+    operator: true,
+    inject_doc_comment: true,
+    macro_bang: true,
+    syntactic_name_ref_highlighting: false,
+};
+
+#[test]
+fn attributes() {
+    check_highlighting(
+        r#"
+//- proc_macros: identity
+//- minicore: derive, copy, default
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[proc_macros::identity]
+#[derive(Default)]
+/// This is a doc comment
+// This is a normal comment
+/// This is a doc comment
+#[derive(Copy)]
+// This is another normal comment
+/// This is another doc comment
+// This is another normal comment
+#[derive(Copy, Unresolved)]
+// The reason for these being here is to test AttrIds
+enum Foo {
+    #[default]
+    Bar
+}
+"#,
+        expect_file!["./test_data/highlight_attributes.html"],
+        false,
+    );
+}
+
+#[test]
+fn macros() {
+    check_highlighting(
+        r#"
+//- proc_macros: mirror, identity, derive_identity
+//- minicore: fmt, include, concat
+//- /lib.rs crate:lib
+use proc_macros::{mirror, identity, DeriveIdentity};
+
+mirror! {
+    {
+        ,i32 :x pub
+        ,i32 :y pub
+    } Foo struct
+}
+macro_rules! def_fn {
+    ($($tt:tt)*) => {$($tt)*}
+}
+
+def_fn! {
+    fn bar() -> u32 {
+        100
+    }
+}
+
+macro_rules! dont_color_me_braces {
+    () => {0}
+}
+
+macro_rules! noop {
+    ($expr:expr) => {
+        $expr
+    }
+}
+
+/// textually shadow previous definition
+macro_rules! noop {
+    ($expr:expr) => {
+        $expr
+    }
+}
+
+macro_rules! keyword_frag {
+    ($type:ty) => ($type)
+}
+
+macro with_args($i:ident) {
+    $i
+}
+
+macro without_args {
+    ($i:ident) => {
+        $i
+    }
+}
+
+macro_rules! id {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
+include!(concat!("foo/", "foo.rs"));
+
+struct S<T>(T);
+fn main() {
+    struct TestLocal;
+    // regression test, TestLocal here used to not resolve
+    let _: S<id![TestLocal]>;
+
+    format_args!("Hello, {}!", (92,).0);
+    dont_color_me_braces!();
+    noop!(noop!(1));
+}
+//- /foo/foo.rs crate:foo
+mod foo {}
+use self::foo as bar;
+"#,
+        expect_file!["./test_data/highlight_macros.html"],
+        false,
+    );
+}
+
+/// If what you want to test feels like a specific entity consider making a new test instead,
+/// this test fixture here in fact should shrink instead of grow ideally.
 #[test]
 fn test_highlighting() {
     check_highlighting(
         r#"
-//- proc_macros: identity, mirror
 //- minicore: derive, copy
 //- /main.rs crate:main deps:foo
 use inner::{self as inner_mod};
 mod inner {}
 
-#[allow()]
-#[rustfmt::skip]
-#[proc_macros::identity]
 pub mod ops {
     #[lang = "fn_once"]
     pub trait FnOnce<Args> {}
@@ -30,18 +152,15 @@ pub mod ops {
     pub trait Fn<Args>: FnMut<Args> {}
 }
 
-proc_macros::mirror! {
-    {
-        ,i32 :x pub
-        ,i32 :y pub
-    } Foo struct
+struct Foo {
+    x: u32,
 }
 
-trait Bar where Self: {
+trait Bar {
     fn bar(&self) -> i32;
 }
 
-impl Bar for Foo where Self: {
+impl Bar for Foo {
     fn bar(&self) -> i32 {
         self.x
     }
@@ -64,15 +183,6 @@ impl Foo {
 use self::FooCopy::{self as BarCopy};
 
 #[derive(Copy)]
-/// This is a doc comment
-// This is a normal comment
-/// This is a doc comment
-#[derive(Copy)]
-// This is another normal comment
-/// This is another doc comment
-// This is another normal comment
-#[derive(Copy)]
-// The reason for these being here is to test AttrIds
 struct FooCopy {
     x: u32,
 }
@@ -104,6 +214,7 @@ fn never() -> ! {
 }
 
 fn const_param<const FOO: usize>() -> usize {
+    const_param::<{ FOO }>();
     FOO
 }
 
@@ -118,57 +229,8 @@ fn foo() {
     let bar = foobar();
 }
 
-macro_rules! def_fn {
-    ($($tt:tt)*) => {$($tt)*}
-}
-
-def_fn! {
-    fn bar() -> u32 {
-        100
-    }
-}
-
-macro_rules! dont_color_me_braces {
-    () => {0}
-}
-
-macro_rules! noop {
-    ($expr:expr) => {
-        $expr
-    }
-}
-
-macro_rules! keyword_frag {
-    ($type:ty) => ($type)
-}
-
-macro with_args($i:ident) {
-    $i
-}
-
-macro without_args {
-    ($i:ident) => {
-        $i
-    }
-}
-
 // comment
 fn main() {
-    println!("Hello, {}!", 92);
-    dont_color_me_braces!();
-
-    let mut vec = Vec::new();
-    if true {
-        let x = 92;
-        vec.push(Foo { x, y: 1 });
-    }
-
-    for e in vec {
-        // Do nothing
-    }
-
-    noop!(noop!(1));
-
     let mut x = 42;
     x += 1;
     let y = &mut x;
@@ -246,10 +308,10 @@ pub enum Bool { True, False }
 
 impl Bool {
     pub const fn to_primitive(self) -> bool {
-        matches!(self, Self::True)
+        true
     }
 }
-const USAGE_OF_BOOL:bool = Bool::True.to_primitive();
+const USAGE_OF_BOOL: bool = Bool::True.to_primitive();
 
 trait Baz {
     type Qux;
@@ -259,6 +321,10 @@ fn baz<T>(t: T)
 where
     T: Baz,
     <T as Baz>::Qux: Bar {}
+
+fn gp_shadows_trait<Baz: Bar>() {
+    Baz::bar;
+}
 
 //- /foo.rs crate:foo
 pub struct Person {
@@ -288,159 +354,72 @@ macro_rules! die {
         panic!();
     };
 }
-"#
-        .trim(),
-        expect_file!["./test_data/highlighting.html"],
-        false,
-    );
-}
-
-#[test]
-fn test_rainbow_highlighting() {
-    check_highlighting(
-        r#"
-fn main() {
-    let hello = "hello";
-    let x = hello.to_string();
-    let y = hello.to_string();
-
-    let x = "other color please!";
-    let y = x.to_string();
-}
-
-fn bar() {
-    let mut hello = "hello";
-}
-"#
-        .trim(),
-        expect_file!["./test_data/rainbow_highlighting.html"],
-        true,
-    );
-}
-
-#[test]
-fn benchmark_syntax_highlighting_long_struct() {
-    if skip_slow_tests() {
-        return;
-    }
-
-    let fixture = bench_fixture::big_struct();
-    let (analysis, file_id) = fixture::file(&fixture);
-
-    let hash = {
-        let _pt = bench("syntax highlighting long struct");
-        analysis
-            .highlight(file_id)
-            .unwrap()
-            .iter()
-            .filter(|it| it.highlight.tag == HlTag::Symbol(SymbolKind::Struct))
-            .count()
-    };
-    assert_eq!(hash, 2001);
-}
-
-#[test]
-fn syntax_highlighting_not_quadratic() {
-    if skip_slow_tests() {
-        return;
-    }
-
-    let mut al = AssertLinear::default();
-    while al.next_round() {
-        for i in 6..=10 {
-            let n = 1 << i;
-
-            let fixture = bench_fixture::big_struct_n(n);
-            let (analysis, file_id) = fixture::file(&fixture);
-
-            let time = Instant::now();
-
-            let hash = analysis
-                .highlight(file_id)
-                .unwrap()
-                .iter()
-                .filter(|it| it.highlight.tag == HlTag::Symbol(SymbolKind::Struct))
-                .count();
-            assert!(hash > n as usize);
-
-            let elapsed = time.elapsed();
-            al.sample(n as f64, elapsed.as_millis() as f64);
-        }
-    }
-}
-
-#[test]
-fn benchmark_syntax_highlighting_parser() {
-    if skip_slow_tests() {
-        return;
-    }
-
-    let fixture = bench_fixture::glorious_old_parser();
-    let (analysis, file_id) = fixture::file(&fixture);
-
-    let hash = {
-        let _pt = bench("syntax highlighting parser");
-        analysis
-            .highlight(file_id)
-            .unwrap()
-            .iter()
-            .filter(|it| it.highlight.tag == HlTag::Symbol(SymbolKind::Function))
-            .count()
-    };
-    assert_eq!(hash, 1616);
-}
-
-#[test]
-fn test_ranges() {
-    let (analysis, file_id) = fixture::file(
-        r#"
-#[derive(Clone, Debug)]
-struct Foo {
-    pub x: i32,
-    pub y: i32,
-}
 "#,
-    );
-
-    // The "x"
-    let highlights = &analysis
-        .highlight_range(FileRange { file_id, range: TextRange::at(45.into(), 1.into()) })
-        .unwrap();
-
-    assert_eq!(&highlights[0].highlight.to_string(), "field.declaration.public");
-}
-
-#[test]
-fn test_flattening() {
-    check_highlighting(
-        r##"
-fn fixture(ra_fixture: &str) {}
-
-fn main() {
-    fixture(r#"
-        trait Foo {
-            fn foo() {
-                println!("2 + 2 = {}", 4);
-            }
-        }"#
-    );
-}"##
-        .trim(),
-        expect_file!["./test_data/highlight_injection.html"],
+        expect_file!["./test_data/highlight_general.html"],
         false,
     );
 }
 
 #[test]
-fn ranges_sorted() {
-    let (analysis, file_id) = fixture::file(
+fn test_lifetime_highlighting() {
+    check_highlighting(
         r#"
-#[foo(bar = "bar")]
-macro_rules! test {}
-}"#
-        .trim(),
+//- minicore: derive
+
+#[derive()]
+struct Foo<'a, 'b, 'c> where 'a: 'a, 'static: 'static {
+    field: &'a (),
+    field2: &'static (),
+}
+impl<'a> Foo<'_, 'a, 'static>
+where
+    'a: 'a,
+    'static: 'static
+{}
+"#,
+        expect_file!["./test_data/highlight_lifetimes.html"],
+        false,
     );
-    let _ = analysis.highlight(file_id).unwrap();
+}
+
+#[test]
+fn test_keyword_highlighting() {
+    for edition in Edition::iter() {
+        check_highlighting(
+            &(format!("//- /main.rs crate:main edition:{edition}")
+                + r#"
+extern crate self;
+
+use crate;
+use self;
+mod __ {
+    use super::*;
+}
+
+macro_rules! void {
+    ($($tt:tt)*) => {}
+}
+
+struct __ where Self:;
+fn __(_: Self) {}
+void!(Self);
+
+// edition dependent
+void!(try async await gen);
+// edition and context dependent
+void!(dyn);
+// builtin custom syntax
+void!(builtin offset_of format_args asm);
+// contextual
+void!(macro_rules, union, default, raw, auto, yeet);
+// reserved
+void!(abstract become box do final macro override priv typeof unsized virtual yield);
+void!('static 'self 'unsafe)
+"#),
+            expect_file![format!("./test_data/highlight_keywords_{edition}.html")],
+            false,
+        );
+    }
 }
 
 #[test]
@@ -449,57 +428,58 @@ fn test_string_highlighting() {
     // thus, we have to copy the macro definition from `std`
     check_highlighting(
         r#"
+//- minicore: fmt, assert, asm, concat, panic
 macro_rules! println {
     ($($arg:tt)*) => ({
-        $crate::io::_print($crate::format_args_nl!($($arg)*));
+        $crate::io::_print(format_args_nl!($($arg)*));
     })
 }
-#[rustc_builtin_macro]
-#[macro_export]
-macro_rules! format_args {}
-#[rustc_builtin_macro]
-#[macro_export]
-macro_rules! const_format_args {}
-#[rustc_builtin_macro]
-#[macro_export]
-macro_rules! format_args_nl {}
 
 mod panic {
     pub macro panic_2015 {
         () => (
-            $crate::panicking::panic("explicit panic")
+            panic("explicit panic")
         ),
         ($msg:literal $(,)?) => (
-            $crate::panicking::panic($msg)
+            panic($msg)
         ),
         // Use `panic_str` instead of `panic_display::<&str>` for non_fmt_panic lint.
         ($msg:expr $(,)?) => (
-            $crate::panicking::panic_str($msg)
+            panic_str($msg)
         ),
         // Special-case the single-argument case for const_panic.
         ("{}", $arg:expr $(,)?) => (
-            $crate::panicking::panic_display(&$arg)
+            panic_display(&$arg)
         ),
         ($fmt:expr, $($arg:tt)+) => (
-            $crate::panicking::panic_fmt($crate::const_format_args!($fmt, $($arg)+))
+            panic_fmt(const_format_args!($fmt, $($arg)+))
         ),
     }
 }
 
-#[rustc_builtin_macro(std_panic)]
-#[macro_export]
-macro_rules! panic {}
-#[rustc_builtin_macro]
-macro_rules! assert {}
-#[rustc_builtin_macro]
-macro_rules! asm {}
-
 macro_rules! toho {
     () => ($crate::panic!("not yet implemented"));
-    ($($arg:tt)+) => ($crate::panic!("not yet implemented: {}", $crate::format_args!($($arg)+)));
+    ($($arg:tt)+) => ($crate::panic!("not yet implemented: {}", format_args!($($arg)+)));
+}
+
+macro_rules! reuse_twice {
+    ($literal:literal) => {{stringify!($literal); format_args!($literal)}};
 }
 
 fn main() {
+    let a = '\n';
+    let a = '\t';
+    let a = '\e'; // invalid escape
+    let a = 'e';
+    let a = ' ';
+    let a = '\u{48}';
+    let a = '\u{4823}';
+    let a = '\x65';
+    let a = '\x00';
+
+    let a = b'\xFF';
+
+    println!("Hello {{Hello}}");
     // from https://doc.rust-lang.org/std/fmt/index.html
     println!("Hello");                 // => "Hello"
     println!("Hello, {}!", "world");   // => "Hello, world!"
@@ -535,14 +515,28 @@ fn main() {
     println!("{}, `{name:.*}` has 3 fractional digits", "Hello", 3, name=1234.56);
     println!("{}, `{name:.*}` has 3 characters", "Hello", 3, name="1234.56");
     println!("{}, `{name:>8.*}` has 3 right-aligned characters", "Hello", 3, name="1234.56");
+
+    let _ = "{}"
+    let _ = "{{}}";
+
     println!("Hello {{}}");
     println!("{{ Hello");
+    println!("Hello }}");
+    println!("{{Hello}}");
+    println!("{{ Hello }}");
+    println!("{{Hello }}");
+    println!("{{ Hello}}");
 
     println!(r"Hello, {}!", "world");
 
     // escape sequences
     println!("Hello\nWorld");
     println!("\u{48}\x65\x6C\x6C\x6F World");
+
+    let _ = "\x28\x28\x00\x63\xFF\u{FF}\n"; // invalid non-UTF8 escape sequences
+    let _ = b"\x28\x28\x00\x63\xFF\u{FF}\n"; // valid bytes, invalid unicodes
+    let _ = c"\u{FF}\xFF"; // valid bytes, valid unicodes
+    let backslash = r"\\";
 
     println!("{\x41}", A = 92);
     println!("{ничоси}", ничоси = 92);
@@ -553,10 +547,21 @@ fn main() {
     assert!(true, "{}", 1);
     assert!(true, "{} asdasd", 1);
     toho!("{}fmt", 0);
-    asm!("mov eax, {0}");
+    let i: u64 = 3;
+    let o: u64;
+    core::arch::asm!(
+        "mov {0}, {1}",
+        "add {0}, 5",
+        out(reg) o,
+        in(reg) i,
+    );
+
+    const CONSTANT: () = ():
+    let mut m = ();
     format_args!(concat!("{}"), "{}");
-}"#
-        .trim(),
+    format_args!("{} {} {} {} {} {} {backslash} {CONSTANT} {m}", backslash, format_args!("{}", 0), foo, "bar", toho!(), backslash);
+    reuse_twice!("{backslash}");
+}"#,
         expect_file!["./test_data/highlight_strings.html"],
         false,
     );
@@ -566,6 +571,17 @@ fn main() {
 fn test_unsafe_highlighting() {
     check_highlighting(
         r#"
+//- minicore: sized
+macro_rules! id {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+macro_rules! unsafe_deref {
+    () => {
+        *(&() as *const ())
+    };
+}
 static mut MUT_GLOBAL: Struct = Struct { field: 0 };
 static GLOBAL: Struct = Struct { field: 0 };
 unsafe fn unsafe_fn() {}
@@ -602,7 +618,15 @@ impl DoTheAutoref for u16 {
 fn main() {
     let x = &5 as *const _ as *const usize;
     let u = Union { b: 0 };
+
+    id! {
+        unsafe { unsafe_deref!() }
+    };
+
     unsafe {
+        unsafe_deref!();
+        id! { unsafe_deref!() };
+
         // unsafe fn and method calls
         unsafe_fn();
         let b = u.b;
@@ -630,9 +654,56 @@ fn main() {
         packed.a.calls_autoref();
     }
 }
-"#
-        .trim(),
+"#,
         expect_file!["./test_data/highlight_unsafe.html"],
+        false,
+    );
+}
+
+#[test]
+fn test_const_highlighting() {
+    check_highlighting(
+        r#"
+macro_rules! id {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+const CONST_ITEM: *const () = &raw const ();
+const fn const_fn<const CONST_PARAM: ()>(const {}: const fn()) where (): const ConstTrait {
+    CONST_ITEM;
+    CONST_PARAM;
+    const {
+        const || {}
+    }
+    id!(
+        CONST_ITEM;
+        CONST_PARAM;
+        const {
+            const || {}
+        };
+        &raw const ();
+        const
+    );
+    ().assoc_const_method();
+}
+trait ConstTrait {
+    const ASSOC_CONST: () = ();
+    const fn assoc_const_fn() {}
+    const fn assoc_const_method(self) {}
+}
+impl const ConstTrait for () {
+    const ASSOC_CONST: () = ();
+    const fn assoc_const_fn() {}
+}
+
+macro_rules! unsafe_deref {
+    () => {
+        *(&() as *const ())
+    };
+}
+"#,
+        expect_file!["./test_data/highlight_const.html"],
         false,
     );
 }
@@ -656,7 +727,7 @@ struct Foo {
     bar: bool,
 }
 
-/// This is an impl with a code block.
+/// This is an impl of [`Foo`] with a code block.
 ///
 /// ```
 /// fn foo() {
@@ -708,6 +779,18 @@ impl Foo {
     ///
     /// ```rust,no_run
     /// let foobar = Foo::new().bar();
+    /// ```
+    ///
+    /// ~~~rust,no_run
+    /// // code block with tilde.
+    /// let foobar = Foo::new().bar();
+    /// ~~~
+    ///
+    /// ```
+    /// // functions
+    /// fn foo<T, const X: usize>(arg: i32) {
+    ///     let x: T = X;
+    /// }
     /// ```
     ///
     /// ```sh
@@ -781,8 +864,7 @@ pub fn block_comments2() {}
 //! ```
 //! fn test() {}
 //! ```
-"#
-        .trim(),
+"#,
         expect_file!["./test_data/highlight_doctest.html"],
         false,
     );
@@ -792,14 +874,15 @@ pub fn block_comments2() {}
 fn test_extern_crate() {
     check_highlighting(
         r#"
-        //- /main.rs crate:main deps:std,alloc
-        extern crate std;
-        extern crate alloc as abc;
-        //- /std/lib.rs crate:std
-        pub struct S;
-        //- /alloc/lib.rs crate:alloc
-        pub struct A
-        "#,
+//- /main.rs crate:main deps:std,alloc
+extern crate std;
+extern crate alloc as abc;
+extern crate unresolved as definitely_unresolved;
+//- /std/lib.rs crate:std
+pub struct S;
+//- /alloc/lib.rs crate:alloc
+pub struct A
+"#,
         expect_file!["./test_data/highlight_extern_crate.html"],
         false,
     );
@@ -809,41 +892,41 @@ fn test_extern_crate() {
 fn test_crate_root() {
     check_highlighting(
         r#"
-        //- minicore: iterators
-        //- /main.rs crate:main deps:foo
-        extern crate foo;
-        use core::iter;
+//- minicore: iterators
+//- /main.rs crate:main deps:foo
+extern crate foo;
+use core::iter;
 
-        pub const NINETY_TWO: u8 = 92;
+pub const NINETY_TWO: u8 = 92;
 
-        use foo as foooo;
+use foo as foooo;
 
-        pub(crate) fn main() {
-            let baz = iter::repeat(92);
-        }
+pub(crate) fn main() {
+    let baz = iter::repeat(92);
+}
 
-        mod bar {
-            pub(in super) const FORTY_TWO: u8 = 42;
+mod bar {
+    pub(in super) const FORTY_TWO: u8 = 42;
 
-            mod baz {
-                use super::super::NINETY_TWO;
-                use crate::foooo::Point;
+    mod baz {
+        use super::super::NINETY_TWO;
+        use crate::foooo::Point;
 
-                pub(in super::super) const TWENTY_NINE: u8 = 29;
-            }
-        }
-        //- /foo.rs crate:foo
-        struct Point {
-            x: u8,
-            y: u8,
-        }
+        pub(in super::super) const TWENTY_NINE: u8 = 29;
+    }
+}
+//- /foo.rs crate:foo
+struct Point {
+    x: u8,
+    y: u8,
+}
 
-        mod inner {
-            pub(super) fn swap(p: crate::Point) -> crate::Point {
-                crate::Point { x: p.y, y: p.x }
-            }
-        }
-        "#,
+mod inner {
+    pub(super) fn swap(p: crate::Point) -> crate::Point {
+        crate::Point { x: p.y, y: p.x }
+    }
+}
+"#,
         expect_file!["./test_data/highlight_crate_root.html"],
         false,
     );
@@ -853,14 +936,14 @@ fn test_crate_root() {
 fn test_default_library() {
     check_highlighting(
         r#"
-        //- minicore: option, iterators
-        use core::iter;
+//- minicore: option, iterators
+use core::iter;
 
-        fn main() {
-            let foo = Some(92);
-            let nums = iter::repeat(foo.unwrap());
-        }
-        "#,
+fn main() {
+    let foo = Some(92);
+    let nums = iter::repeat(foo.unwrap());
+}
+"#,
         expect_file!["./test_data/highlight_default_library.html"],
         false,
     );
@@ -888,7 +971,7 @@ impl t for foo {
     pub fn is_static() {}
     pub fn is_not_static(&self) {}
 }
-        "#,
+"#,
         expect_file!["./test_data/highlight_assoc_functions.html"],
         false,
     )
@@ -898,26 +981,397 @@ impl t for foo {
 fn test_injection() {
     check_highlighting(
         r##"
-fn f(ra_fixture: &str) {}
+fn fixture(ra_fixture: &str) {}
+
 fn main() {
-    f(r"
+    fixture(r#"
+trait Foo {
+    fn foo() {
+        println!("2 + 2 = {}", 4);
+    }
+}"#
+    );
+    fixture(r"
 fn foo() {
     foo(\$0{
         92
     }\$0)
-}");
+}"
+    );
 }
-    "##,
-        expect_file!["./test_data/injection.html"],
+"##,
+        expect_file!["./test_data/highlight_injection.html"],
         false,
     );
+}
+
+#[test]
+fn test_operators() {
+    check_highlighting(
+        r##"
+fn main() {
+    1 + 1 - 1 * 1 / 1 % 1 | 1 & 1 ! 1 ^ 1 >> 1 << 1;
+    let mut a = 0;
+    a += 1;
+    a -= 1;
+    a *= 1;
+    a /= 1;
+    a %= 1;
+    a |= 1;
+    a &= 1;
+    a ^= 1;
+    a >>= 1;
+    a <<= 1;
+}
+"##,
+        expect_file!["./test_data/highlight_operators.html"],
+        false,
+    );
+}
+
+#[test]
+fn test_mod_hl_injection() {
+    check_highlighting(
+        r##"
+//- /foo.rs
+//! [Struct]
+//! This is an intra doc injection test for modules
+//! [Struct]
+//! This is an intra doc injection test for modules
+
+pub struct Struct;
+//- /lib.rs crate:foo
+/// [crate::foo::Struct]
+/// This is an intra doc injection test for modules
+/// [crate::foo::Struct]
+/// This is an intra doc injection test for modules
+mod foo;
+"##,
+        expect_file!["./test_data/highlight_module_docs_inline.html"],
+        false,
+    );
+    check_highlighting(
+        r##"
+//- /lib.rs crate:foo
+/// [crate::foo::Struct]
+/// This is an intra doc injection test for modules
+/// [crate::foo::Struct]
+/// This is an intra doc injection test for modules
+mod foo;
+//- /foo.rs
+//! [Struct]
+//! This is an intra doc injection test for modules
+//! [Struct]
+//! This is an intra doc injection test for modules
+
+pub struct Struct;
+"##,
+        expect_file!["./test_data/highlight_module_docs_outline.html"],
+        false,
+    );
+}
+
+#[test]
+fn test_rainbow_highlighting() {
+    check_highlighting(
+        r#"
+fn main() {
+    let hello = "hello";
+    let x = hello.to_string();
+    let y = hello.to_string();
+
+    let x = "other color please!";
+    let y = x.to_string();
+}
+
+fn bar() {
+    let mut hello = "hello";
+}
+"#,
+        expect_file!["./test_data/highlight_rainbow.html"],
+        true,
+    );
+}
+
+#[test]
+fn test_block_mod_items() {
+    check_highlighting(
+        r#"
+macro_rules! foo {
+    ($foo:ident) => {
+        mod y {
+            pub struct $foo;
+        }
+    };
+}
+fn main() {
+    foo!(Foo);
+    mod module {
+        foo!(Bar);
+        fn func(_: y::Bar) {
+            mod inner {
+                struct Innerest<const C: usize> { field: [(); {C}] }
+            }
+        }
+    }
+}
+"#,
+        expect_file!["./test_data/highlight_block_mod_items.html"],
+        false,
+    );
+}
+
+#[test]
+fn test_ranges() {
+    let (analysis, file_id) = fixture::file(
+        r#"
+#[derive(Clone, Debug)]
+struct Foo {
+    pub x: i32,
+    pub y: i32,
+}
+"#,
+    );
+
+    // The "x"
+    let highlights = &analysis
+        .highlight_range(
+            HL_CONFIG,
+            FileRange { file_id, range: TextRange::at(45.into(), 1.into()) },
+        )
+        .unwrap();
+
+    assert_eq!(&highlights[0].highlight.to_string(), "field.declaration.public");
+}
+
+#[test]
+fn ranges_sorted() {
+    let (analysis, file_id) = fixture::file(
+        r#"
+#[foo(bar = "bar")]
+macro_rules! test {}
+}"#
+        .trim(),
+    );
+    let _ = analysis.highlight(HL_CONFIG, file_id).unwrap();
+}
+
+#[test]
+fn highlight_callable_no_crash() {
+    // regression test for #13838.
+    let (analysis, file_id) = fixture::file(
+        r#"
+//- minicore: fn, sized
+impl<A, F: ?Sized> FnOnce<A> for &F
+where
+    F: Fn<A>,
+{
+    type Output = F::Output;
+}
+
+trait Trait {}
+fn foo(x: &fn(&dyn Trait)) {}
+"#,
+    );
+    let _ = analysis.highlight(HL_CONFIG, file_id).unwrap();
 }
 
 /// Highlights the code given by the `ra_fixture` argument, renders the
 /// result as HTML, and compares it with the HTML file given as `snapshot`.
 /// Note that the `snapshot` file is overwritten by the rendered HTML.
 fn check_highlighting(ra_fixture: &str, expect: ExpectFile, rainbow: bool) {
-    let (analysis, file_id) = fixture::file(ra_fixture);
+    let (analysis, file_id) = fixture::file(ra_fixture.trim());
     let actual_html = &analysis.highlight_as_html(file_id, rainbow).unwrap();
     expect.assert_eq(actual_html)
+}
+
+#[test]
+fn benchmark_syntax_highlighting_long_struct() {
+    if skip_slow_tests() {
+        return;
+    }
+
+    let fixture = bench_fixture::big_struct();
+    let (analysis, file_id) = fixture::file(&fixture);
+
+    let hash = {
+        let _pt = bench("syntax highlighting long struct");
+        analysis
+            .highlight(HL_CONFIG, file_id)
+            .unwrap()
+            .iter()
+            .filter(|it| it.highlight.tag == HlTag::Symbol(SymbolKind::Struct))
+            .count()
+    };
+    assert_eq!(hash, 2001);
+}
+
+#[test]
+fn syntax_highlighting_not_quadratic() {
+    if skip_slow_tests() {
+        return;
+    }
+
+    let mut al = AssertLinear::default();
+    while al.next_round() {
+        for i in 6..=10 {
+            let n = 1 << i;
+
+            let fixture = bench_fixture::big_struct_n(n);
+            let (analysis, file_id) = fixture::file(&fixture);
+
+            let time = Instant::now();
+
+            let hash = analysis
+                .highlight(HL_CONFIG, file_id)
+                .unwrap()
+                .iter()
+                .filter(|it| it.highlight.tag == HlTag::Symbol(SymbolKind::Struct))
+                .count();
+            assert!(hash > n as usize);
+
+            let elapsed = time.elapsed();
+            al.sample(n as f64, elapsed.as_millis() as f64);
+        }
+    }
+}
+
+#[test]
+fn benchmark_syntax_highlighting_parser() {
+    if skip_slow_tests() {
+        return;
+    }
+
+    let fixture = bench_fixture::glorious_old_parser();
+    let (analysis, file_id) = fixture::file(&fixture);
+
+    let hash = {
+        let _pt = bench("syntax highlighting parser");
+        analysis
+            .highlight(HL_CONFIG, file_id)
+            .unwrap()
+            .iter()
+            .filter(|it| {
+                matches!(it.highlight.tag, HlTag::Symbol(SymbolKind::Function | SymbolKind::Method))
+            })
+            .count()
+    };
+    assert_eq!(hash, 1167);
+}
+
+#[test]
+fn highlight_trait_with_lifetimes_regression_16958() {
+    let (analysis, file_id) = fixture::file(
+        r#"
+pub trait Deserialize<'de> {
+    fn deserialize();
+}
+
+fn f<'de, T: Deserialize<'de>>() {
+    T::deserialize();
+}
+"#
+        .trim(),
+    );
+    let _ = analysis.highlight(HL_CONFIG, file_id).unwrap();
+}
+
+#[test]
+fn test_asm_highlighting() {
+    check_highlighting(
+        r#"
+//- minicore: asm, concat
+fn main() {
+    unsafe {
+        let foo = 1;
+        let mut o = 0;
+        core::arch::asm!(
+            "%input = OpLoad _ {0}",
+            concat!("%result = ", "bar", " _ %input"),
+            "OpStore {1} %result",
+            in(reg) &foo,
+            in(reg) &mut o,
+        );
+
+        let thread_id: usize;
+        core::arch::asm!("
+            mov {0}, gs:[0x30]
+            mov {0}, [{0}+0x48]
+        ", out(reg) thread_id, options(pure, readonly, nostack));
+
+        static UNMAP_BASE: usize;
+        const MEM_RELEASE: usize;
+        static VirtualFree: usize;
+        const OffPtr: usize;
+        const OffFn: usize;
+        core::arch::asm!("
+            push {free_type}
+            push {free_size}
+            push {base}
+
+            mov eax, fs:[30h]
+            mov eax, [eax+8h]
+            add eax, {off_fn}
+            mov [eax-{off_fn}+{off_ptr}], eax
+
+            push eax
+
+            jmp {virtual_free}
+            ",
+            off_ptr = const OffPtr,
+            off_fn  = const OffFn,
+
+            free_size = const 0,
+            free_type = const MEM_RELEASE,
+
+            virtual_free = sym VirtualFree,
+
+            base = sym UNMAP_BASE,
+            options(noreturn),
+        );
+    }
+}
+// taken from https://github.com/rust-embedded/cortex-m/blob/47921b51f8b960344fcfa1255a50a0d19efcde6d/cortex-m/src/asm.rs#L254-L274
+#[inline]
+pub unsafe fn bootstrap(msp: *const u32, rv: *const u32) -> ! {
+    // Ensure thumb mode is set.
+    let rv = (rv as u32) | 1;
+    let msp = msp as u32;
+    core::arch::asm!(
+        "mrs {tmp}, CONTROL",
+        "bics {tmp}, {spsel}",
+        "msr CONTROL, {tmp}",
+        "isb",
+        "msr MSP, {msp}",
+        "bx {rv}",
+        // `out(reg) _` is not permitted in a `noreturn` asm! call,
+        // so instead use `in(reg) 0` and don't restore it afterwards.
+        tmp = in(reg) 0,
+        spsel = in(reg) 2,
+        msp = in(reg) msp,
+        rv = in(reg) rv,
+        options(noreturn, nomem, nostack),
+    );
+}
+"#,
+        expect_file!["./test_data/highlight_asm.html"],
+        false,
+    );
+}
+
+#[test]
+fn issue_18089() {
+    check_highlighting(
+        r#"
+//- proc_macros: issue_18089
+fn main() {
+    template!(template);
+}
+
+#[proc_macros::issue_18089]
+fn template() {}
+"#,
+        expect_file!["./test_data/highlight_issue_18089.html"],
+        false,
+    );
 }

@@ -1,9 +1,11 @@
 # cargo-doc(1)
-{{*set actionverb="Document"}}
+{{~*set command="doc"}}
+{{~*set actionverb="Document"}}
+{{~*set multitarget=true}}
 
 ## NAME
 
-cargo-doc - Build a package's documentation
+cargo-doc --- Build a package's documentation
 
 ## SYNOPSIS
 
@@ -76,8 +78,6 @@ and supports common Unix glob patterns.
 
 {{> options-profile }}
 
-{{> options-ignore-rust-version }}
-
 {{> options-timings }}
 
 {{/options}}
@@ -101,7 +101,11 @@ and supports common Unix glob patterns.
 {{#options}}
 {{> options-manifest-path }}
 
+{{> options-ignore-rust-version }}
+
 {{> options-locked }}
+
+{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-options-common }}
@@ -110,6 +114,7 @@ and supports common Unix glob patterns.
 
 {{#options}}
 {{> options-jobs }}
+{{> options-keep-going }}
 {{/options}}
 
 {{> section-environment }}

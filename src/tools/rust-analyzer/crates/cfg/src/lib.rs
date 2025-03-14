@@ -8,7 +8,8 @@ mod tests;
 use std::fmt;
 
 use rustc_hash::FxHashSet;
-use tt::SmolStr;
+
+use intern::Symbol;
 
 pub use cfg_expr::{CfgAtom, CfgExpr};
 pub use dnf::DnfExpr;
@@ -35,7 +36,7 @@ impl fmt::Debug for CfgOptions {
             .iter()
             .map(|atom| match atom {
                 CfgAtom::Flag(it) => it.to_string(),
-                CfgAtom::KeyValue { key, value } => format!("{}={}", key, value),
+                CfgAtom::KeyValue { key, value } => format!("{key}={value}"),
             })
             .collect::<Vec<_>>();
         items.sort();
@@ -48,11 +49,15 @@ impl CfgOptions {
         cfg.fold(&|atom| self.enabled.contains(atom))
     }
 
-    pub fn insert_atom(&mut self, key: SmolStr) {
+    pub fn check_atom(&self, cfg: &CfgAtom) -> bool {
+        self.enabled.contains(cfg)
+    }
+
+    pub fn insert_atom(&mut self, key: Symbol) {
         self.enabled.insert(CfgAtom::Flag(key));
     }
 
-    pub fn insert_key_value(&mut self, key: SmolStr, value: SmolStr) {
+    pub fn insert_key_value(&mut self, key: Symbol, value: Symbol) {
         self.enabled.insert(CfgAtom::KeyValue { key, value });
     }
 
@@ -66,25 +71,56 @@ impl CfgOptions {
         }
     }
 
-    pub fn get_cfg_keys(&self) -> impl Iterator<Item = &SmolStr> {
-        self.enabled.iter().map(|x| match x {
+    pub fn get_cfg_keys(&self) -> impl Iterator<Item = &Symbol> {
+        self.enabled.iter().map(|it| match it {
             CfgAtom::Flag(key) => key,
             CfgAtom::KeyValue { key, .. } => key,
         })
     }
 
-    pub fn get_cfg_values<'a>(
-        &'a self,
-        cfg_key: &'a str,
-    ) -> impl Iterator<Item = &'a SmolStr> + 'a {
-        self.enabled.iter().filter_map(move |x| match x {
-            CfgAtom::KeyValue { key, value } if cfg_key == key => Some(value),
+    pub fn get_cfg_values<'a>(&'a self, cfg_key: &'a str) -> impl Iterator<Item = &'a Symbol> + 'a {
+        self.enabled.iter().filter_map(move |it| match it {
+            CfgAtom::KeyValue { key, value } if cfg_key == key.as_str() => Some(value),
             _ => None,
         })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl Extend<CfgAtom> for CfgOptions {
+    fn extend<T: IntoIterator<Item = CfgAtom>>(&mut self, iter: T) {
+        iter.into_iter().for_each(|cfg_flag| _ = self.enabled.insert(cfg_flag));
+    }
+}
+
+impl IntoIterator for CfgOptions {
+    type Item = <FxHashSet<CfgAtom> as IntoIterator>::Item;
+
+    type IntoIter = <FxHashSet<CfgAtom> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        <FxHashSet<CfgAtom> as IntoIterator>::into_iter(self.enabled)
+    }
+}
+
+impl<'a> IntoIterator for &'a CfgOptions {
+    type Item = <&'a FxHashSet<CfgAtom> as IntoIterator>::Item;
+
+    type IntoIter = <&'a FxHashSet<CfgAtom> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        <&FxHashSet<CfgAtom> as IntoIterator>::into_iter(&self.enabled)
+    }
+}
+
+impl FromIterator<CfgAtom> for CfgOptions {
+    fn from_iter<T: IntoIterator<Item = CfgAtom>>(iter: T) -> Self {
+        let mut options = CfgOptions::default();
+        options.extend(iter);
+        options
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct CfgDiff {
     // Invariants: No duplicates, no atom that's both in `enable` and `disable`.
     enable: Vec<CfgAtom>,
@@ -96,11 +132,9 @@ impl CfgDiff {
     /// of both.
     pub fn new(enable: Vec<CfgAtom>, disable: Vec<CfgAtom>) -> Option<CfgDiff> {
         let mut occupied = FxHashSet::default();
-        for item in enable.iter().chain(disable.iter()) {
-            if !occupied.insert(item) {
-                // was present
-                return None;
-            }
+        if enable.iter().chain(disable.iter()).any(|item| !occupied.insert(item)) {
+            // was present
+            return None;
         }
 
         Some(CfgDiff { enable, disable })
@@ -128,7 +162,7 @@ impl fmt::Display for CfgDiff {
                 };
                 f.write_str(sep)?;
 
-                write!(f, "{}", atom)?;
+                atom.fmt(f)?;
             }
 
             if !self.disable.is_empty() {
@@ -146,7 +180,7 @@ impl fmt::Display for CfgDiff {
                 };
                 f.write_str(sep)?;
 
-                write!(f, "{}", atom)?;
+                atom.fmt(f)?;
             }
         }
 
@@ -170,10 +204,10 @@ impl fmt::Display for InactiveReason {
                 };
                 f.write_str(sep)?;
 
-                write!(f, "{}", atom)?;
+                atom.fmt(f)?;
             }
             let is_are = if self.enabled.len() == 1 { "is" } else { "are" };
-            write!(f, " {} enabled", is_are)?;
+            write!(f, " {is_are} enabled")?;
 
             if !self.disabled.is_empty() {
                 f.write_str(" and ")?;
@@ -189,10 +223,10 @@ impl fmt::Display for InactiveReason {
                 };
                 f.write_str(sep)?;
 
-                write!(f, "{}", atom)?;
+                atom.fmt(f)?;
             }
             let is_are = if self.disabled.len() == 1 { "is" } else { "are" };
-            write!(f, " {} disabled", is_are)?;
+            write!(f, " {is_are} disabled")?;
         }
 
         Ok(())

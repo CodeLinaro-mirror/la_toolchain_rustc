@@ -30,17 +30,20 @@ cfg_if::cfg_if! {
     if #[cfg(windows)] {
         #[path = "gimli/mmap_windows.rs"]
         mod mmap;
+    } else if #[cfg(target_vendor = "apple")] {
+        #[path = "gimli/mmap_unix.rs"]
+        mod mmap;
     } else if #[cfg(any(
         target_os = "android",
         target_os = "freebsd",
         target_os = "fuchsia",
         target_os = "haiku",
-        target_os = "ios",
+        target_os = "hurd",
         target_os = "linux",
-        target_os = "macos",
         target_os = "openbsd",
         target_os = "solaris",
         target_os = "illumos",
+        target_os = "aix",
     ))] {
         #[path = "gimli/mmap_unix.rs"]
         mod mmap;
@@ -58,7 +61,7 @@ struct Mapping {
     // 'static lifetime is a lie to hack around lack of support for self-referential structs.
     cx: Context<'static>,
     _map: Mmap,
-    _stash: Stash,
+    stash: Stash,
 }
 
 enum Either<A, B> {
@@ -97,7 +100,7 @@ impl Mapping {
             // only borrow `map` and `stash` and we're preserving them below.
             cx: unsafe { core::mem::transmute::<Context<'_>, Context<'static>>(cx) },
             _map: data,
-            _stash: stash,
+            stash,
         })
     }
 }
@@ -105,6 +108,7 @@ impl Mapping {
 struct Context<'a> {
     dwarf: addr2line::Context<EndianSlice<'a, Endian>>,
     object: Object<'a>,
+    package: Option<gimli::DwarfPackage<EndianSlice<'a, Endian>>>,
 }
 
 impl<'data> Context<'data> {
@@ -112,10 +116,18 @@ impl<'data> Context<'data> {
         stash: &'data Stash,
         object: Object<'data>,
         sup: Option<Object<'data>>,
+        dwp: Option<Object<'data>>,
     ) -> Option<Context<'data>> {
         let mut sections = gimli::Dwarf::load(|id| -> Result<_, ()> {
-            let data = object.section(stash, id.name()).unwrap_or(&[]);
-            Ok(EndianSlice::new(data, Endian))
+            if cfg!(not(target_os = "aix")) {
+                let data = object.section(stash, id.name()).unwrap_or(&[]);
+                Ok(EndianSlice::new(data, Endian))
+            } else if let Some(name) = id.xcoff_name() {
+                let data = object.section(stash, name).unwrap_or(&[]);
+                Ok(EndianSlice::new(data, Endian))
+            } else {
+                Ok(EndianSlice::new(&[], Endian))
+            }
         })
         .ok()?;
 
@@ -129,7 +141,46 @@ impl<'data> Context<'data> {
         }
         let dwarf = addr2line::Context::from_dwarf(sections).ok()?;
 
-        Some(Context { dwarf, object })
+        let mut package = None;
+        if let Some(dwp) = dwp {
+            package = Some(
+                gimli::DwarfPackage::load(
+                    |id| -> Result<_, gimli::Error> {
+                        let data = id
+                            .dwo_name()
+                            .and_then(|name| dwp.section(stash, name))
+                            .unwrap_or(&[]);
+                        Ok(EndianSlice::new(data, Endian))
+                    },
+                    EndianSlice::new(&[], Endian),
+                )
+                .ok()?,
+            );
+        }
+
+        Some(Context {
+            dwarf,
+            object,
+            package,
+        })
+    }
+
+    fn find_frames(
+        &'_ self,
+        stash: &'data Stash,
+        probe: u64,
+    ) -> gimli::Result<addr2line::FrameIter<'_, EndianSlice<'data, Endian>>> {
+        use addr2line::{LookupContinuation, LookupResult};
+
+        let mut l = self.dwarf.find_frames(probe);
+        loop {
+            let (load, continuation) = match l {
+                LookupResult::Output(output) => break output,
+                LookupResult::Load { load, continuation } => (load, continuation),
+            };
+
+            l = continuation.resume(handle_split_dwarf(self.package.as_ref(), stash, load));
+        }
     }
 }
 
@@ -142,18 +193,16 @@ fn mmap(path: &Path) -> Option<Mmap> {
 cfg_if::cfg_if! {
     if #[cfg(windows)] {
         mod coff;
-        use self::coff::Object;
-    } else if #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "watchos",
-    ))] {
+        use self::coff::{handle_split_dwarf, Object};
+    } else if #[cfg(any(target_vendor = "apple"))] {
         mod macho;
-        use self::macho::Object;
+        use self::macho::{handle_split_dwarf, Object};
+    } else if #[cfg(target_os = "aix")] {
+        mod xcoff;
+        use self::xcoff::{handle_split_dwarf, Object};
     } else {
         mod elf;
-        use self::elf::Object;
+        use self::elf::{handle_split_dwarf, Object};
     }
 }
 
@@ -161,12 +210,7 @@ cfg_if::cfg_if! {
     if #[cfg(windows)] {
         mod libs_windows;
         use libs_windows::native_libraries;
-    } else if #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "watchos",
-    ))] {
+    } else if #[cfg(target_vendor = "apple")] {
         mod libs_macos;
         use libs_macos::native_libraries;
     } else if #[cfg(target_os = "illumos")] {
@@ -177,19 +221,27 @@ cfg_if::cfg_if! {
             target_os = "linux",
             target_os = "fuchsia",
             target_os = "freebsd",
+            target_os = "hurd",
             target_os = "openbsd",
-            all(target_os = "android", feature = "dl_iterate_phdr"),
+            target_os = "netbsd",
+            target_os = "nto",
+            target_os = "android",
         ),
         not(target_env = "uclibc"),
     ))] {
         mod libs_dl_iterate_phdr;
         use libs_dl_iterate_phdr::native_libraries;
+        #[path = "gimli/parse_running_mmaps_unix.rs"]
+        mod parse_running_mmaps;
     } else if #[cfg(target_env = "libnx")] {
         mod libs_libnx;
         use libs_libnx::native_libraries;
     } else if #[cfg(target_os = "haiku")] {
         mod libs_haiku;
         use libs_haiku::native_libraries;
+    } else if #[cfg(target_os = "aix")] {
+        mod libs_aix;
+        use libs_aix::native_libraries;
     } else {
         // Everything else should doesn't know how to load native libraries.
         fn native_libraries() -> Vec<Library> {
@@ -205,7 +257,7 @@ struct Cache {
 
     /// Mappings cache where we retain parsed dwarf information.
     ///
-    /// This list has a fixed capacity for its entire liftime which never
+    /// This list has a fixed capacity for its entire lifetime which never
     /// increases. The `usize` element of each pair is an index into `libraries`
     /// above where `usize::max_value()` represents the current executable. The
     /// `Mapping` is corresponding parsed dwarf information.
@@ -217,6 +269,13 @@ struct Cache {
 
 struct Library {
     name: OsString,
+    #[cfg(target_os = "aix")]
+    /// On AIX, the library mmapped can be a member of a big-archive file.
+    /// For example, with a big-archive named libfoo.a containing libbar.so,
+    /// one can use `dlopen("libfoo.a(libbar.so)", RTLD_MEMBER | RTLD_LAZY)`
+    /// to use the `libbar.so` library. In this case, only `libbar.so` is
+    /// mmapped, not the whole `libfoo.a`.
+    member_name: OsString,
     /// Segments of this library loaded into memory, and where they're loaded.
     segments: Vec<LibrarySegment>,
     /// The "bias" of this library, typically where it's loaded into memory.
@@ -232,8 +291,21 @@ struct LibrarySegment {
     /// actually where the segment is loaded, but rather this address plus the
     /// containing library's `bias` is where to find it.
     stated_virtual_memory_address: usize,
-    /// The size of ths segment in memory.
+    /// The size of this segment in memory.
     len: usize,
+}
+
+#[cfg(target_os = "aix")]
+fn create_mapping(lib: &Library) -> Option<Mapping> {
+    let name = &lib.name;
+    let member_name = &lib.member_name;
+    Mapping::new(name.as_ref(), member_name)
+}
+
+#[cfg(not(target_os = "aix"))]
+fn create_mapping(lib: &Library) -> Option<Mapping> {
+    let name = &lib.name;
+    Mapping::new(name.as_ref())
 }
 
 // unsafe because this is required to be externally synchronized
@@ -293,14 +365,14 @@ impl Cache {
                 }
 
                 // Now that we know `lib` contains `addr`, we can offset with
-                // the bias to find the stated virutal memory address.
+                // the bias to find the stated virtual memory address.
                 let svma = (addr as usize).wrapping_sub(lib.bias);
                 Some((i, svma as *const u8))
             })
             .next()
     }
 
-    fn mapping_for_lib<'a>(&'a mut self, lib: usize) -> Option<&'a mut Context<'a>> {
+    fn mapping_for_lib<'a>(&'a mut self, lib: usize) -> Option<(&'a mut Context<'a>, &'a Stash)> {
         let idx = self.mappings.iter().position(|(idx, _)| *idx == lib);
 
         // Invariant: after this conditional completes without early returning
@@ -316,8 +388,7 @@ impl Cache {
             // When the mapping is not in the cache, create a new mapping,
             // insert it into the front of the cache, and evict the oldest cache
             // entry if necessary.
-            let name = &self.libraries[lib].name;
-            let mapping = Mapping::new(name.as_ref())?;
+            let mapping = create_mapping(&self.libraries[lib])?;
 
             if self.mappings.len() == MAPPINGS_CACHE_SIZE {
                 self.mappings.pop();
@@ -326,10 +397,15 @@ impl Cache {
             self.mappings.insert(0, (lib, mapping));
         }
 
-        let cx: &'a mut Context<'static> = &mut self.mappings[0].1.cx;
+        let mapping = &mut self.mappings[0].1;
+        let cx: &'a mut Context<'static> = &mut mapping.cx;
+        let stash: &'a Stash = &mapping.stash;
         // don't leak the `'static` lifetime, make sure it's scoped to just
         // ourselves
-        Some(unsafe { mem::transmute::<&'a mut Context<'static>, &'a mut Context<'a>>(cx) })
+        Some((
+            unsafe { mem::transmute::<&'a mut Context<'static>, &'a mut Context<'a>>(cx) },
+            stash,
+        ))
     }
 }
 
@@ -337,26 +413,26 @@ pub unsafe fn resolve(what: ResolveWhat<'_>, cb: &mut dyn FnMut(&super::Symbol))
     let addr = what.address_or_ip();
     let mut call = |sym: Symbol<'_>| {
         // Extend the lifetime of `sym` to `'static` since we are unfortunately
-        // required to here, but it's ony ever going out as a reference so no
+        // required to here, but it's only ever going out as a reference so no
         // reference to it should be persisted beyond this frame anyway.
         let sym = mem::transmute::<Symbol<'_>, Symbol<'static>>(sym);
         (cb)(&super::Symbol { inner: sym });
     };
 
     Cache::with_global(|cache| {
-        let (lib, addr) = match cache.avma_to_svma(addr as *const u8) {
+        let (lib, addr) = match cache.avma_to_svma(addr.cast_const().cast::<u8>()) {
             Some(pair) => pair,
             None => return,
         };
 
         // Finally, get a cached mapping or create a new mapping for this file, and
         // evaluate the DWARF info to find the file/line/name for this address.
-        let cx = match cache.mapping_for_lib(lib) {
-            Some(cx) => cx,
+        let (cx, stash) = match cache.mapping_for_lib(lib) {
+            Some((cx, stash)) => (cx, stash),
             None => return,
         };
         let mut any_frames = false;
-        if let Ok(mut frames) = cx.dwarf.find_frames(addr as u64) {
+        if let Ok(mut frames) = cx.find_frames(stash, addr as u64) {
             while let Ok(Some(frame)) = frames.next() {
                 any_frames = true;
                 let name = match frame.function {
@@ -372,7 +448,7 @@ pub unsafe fn resolve(what: ResolveWhat<'_>, cb: &mut dyn FnMut(&super::Symbol))
         }
         if !any_frames {
             if let Some((object_cx, object_addr)) = cx.object.search_object_map(addr as u64) {
-                if let Ok(mut frames) = object_cx.dwarf.find_frames(object_addr) {
+                if let Ok(mut frames) = object_cx.find_frames(stash, object_addr) {
                     while let Ok(Some(frame)) = frames.next() {
                         any_frames = true;
                         call(Symbol::Frame {
@@ -386,10 +462,7 @@ pub unsafe fn resolve(what: ResolveWhat<'_>, cb: &mut dyn FnMut(&super::Symbol))
         }
         if !any_frames {
             if let Some(name) = cx.object.search_symtab(addr as u64) {
-                call(Symbol::Symtab {
-                    addr: addr as *mut c_void,
-                    name,
-                });
+                call(Symbol::Symtab { name });
             }
         }
     });
@@ -405,7 +478,7 @@ pub enum Symbol<'a> {
     },
     /// Couldn't find debug information, but we found it in the symbol table of
     /// the elf executable.
-    Symtab { addr: *mut c_void, name: &'a [u8] },
+    Symtab { name: &'a [u8] },
 }
 
 impl Symbol<'_> {

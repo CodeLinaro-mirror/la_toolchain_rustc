@@ -23,7 +23,7 @@ struct MyVisitor<...> {
 and you then implement the `Visitor` or `MutVisitor` trait for that type:
 
 ```rust,ignore
-impl<'tcx> MutVisitor<'tcx> for NoLandingPads {
+impl<'tcx> MutVisitor<'tcx> for MyVisitor {
     fn visit_foo(&mut self, ...) {
         ...
         self.super_foo(...);
@@ -37,12 +37,11 @@ code that will execute whenever a `foo` is found. If you want to
 recursively walk the contents of the `foo`, you then invoke the
 `super_foo` method. (NB. You never want to override `super_foo`.)
 
-A very simple example of a visitor can be found in [`NoLandingPads`].
-That visitor doesn't even require any state: it just visits all
-terminators and removes their `unwind` successors.
+A very simple example of a visitor can be found in [`LocalFinder`].
+By implementing `visit_local` method, this visitor identifies local variables that
+can be candidates for reordering.
 
-<!--- TODO: Change NoLandingPads. [#1232](https://github.com/rust-lang/rustc-dev-guide/issues/1232) -->
-[`NoLandingPads`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_transform/no_landing_pads/struct.NoLandingPads.html
+[`LocalFinder`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_transform/prettify/struct.LocalFinder.html
 
 ## Traversal
 

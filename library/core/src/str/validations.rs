@@ -1,8 +1,7 @@
 //! Operations related to UTF-8 validation.
 
-use crate::mem;
-
 use super::Utf8Error;
+use crate::mem;
 
 /// Returns the initial codepoint accumulator for the first byte.
 /// The first byte is special, only want bottom 5 bits for width 2, 4 bits
@@ -112,8 +111,7 @@ where
     Some(ch)
 }
 
-// use truncation to fit u64 into usize
-const NONASCII_MASK: usize = 0x80808080_80808080u64 as usize;
+const NONASCII_MASK: usize = usize::repeat_u8(0x80);
 
 /// Returns `true` if any byte in the word `x` is nonascii (>= 128).
 #[inline]
@@ -162,7 +160,7 @@ pub(super) const fn run_utf8_validation(v: &[u8]) -> Result<(), Utf8Error> {
             //        first  E0 A0 80     last EF BF BF
             //   excluding surrogates codepoints  \u{d800} to  \u{dfff}
             //               ED A0 80 to       ED BF BF
-            // 4-byte encoding is for codepoints \u{1000}0 to \u{10ff}ff
+            // 4-byte encoding is for codepoints \u{10000} to \u{10ffff}
             //        first  F0 90 80 80  last F4 8F BF BF
             //
             // Use the UTF-8 syntax from the RFC
@@ -217,12 +215,12 @@ pub(super) const fn run_utf8_validation(v: &[u8]) -> Result<(), Utf8Error> {
                     // SAFETY: since `align - index` and `ascii_block_size` are
                     // multiples of `usize_bytes`, `block = ptr.add(index)` is
                     // always aligned with a `usize` so it's safe to dereference
-                    // both `block` and `block.offset(1)`.
+                    // both `block` and `block.add(1)`.
                     unsafe {
                         let block = ptr.add(index) as *const usize;
                         // break if there is a nonascii byte
                         let zu = contains_nonascii(*block);
-                        let zv = contains_nonascii(*block.offset(1));
+                        let zv = contains_nonascii(*block.add(1));
                         if zu || zv {
                             break;
                         }

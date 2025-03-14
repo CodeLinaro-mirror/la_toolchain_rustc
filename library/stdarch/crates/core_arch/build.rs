@@ -1,3 +1,3 @@
 fn main() {
-    println!("cargo:rustc-cfg=core_arch_docs");
+    println!("cargo::rustc-check-cfg=cfg(stdarch_intel_sde)");
 }

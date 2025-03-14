@@ -23,6 +23,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSummaryIndex.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
@@ -37,7 +38,7 @@ using namespace llvm;
 
 static cl::OptionCategory DisCategory("Disassembler Options");
 
-static cl::list<std::string> InputFilenames(cl::Positional, cl::ZeroOrMore,
+static cl::list<std::string> InputFilenames(cl::Positional,
                                             cl::desc("[input bitcode]..."),
                                             cl::cat(DisCategory));
 
@@ -78,6 +79,10 @@ static cl::opt<bool> PrintThinLTOIndexOnly(
     "print-thinlto-index-only",
     cl::desc("Only read thinlto index and print the index as LLVM assembly."),
     cl::init(false), cl::Hidden, cl::cat(DisCategory));
+
+extern cl::opt<bool> WriteNewDbgInfoFormat;
+
+extern cl::opt<cl::boolOrDefault> LoadBitcodeIntoNewDbgInfoFormat;
 
 namespace {
 
@@ -166,6 +171,10 @@ int main(int argc, char **argv) {
   cl::HideUnrelatedOptions({&DisCategory, &getColorCategory()});
   cl::ParseCommandLineOptions(argc, argv, "llvm .bc -> .ll disassembler\n");
 
+  // Load bitcode into the new debug info format by default.
+  if (LoadBitcodeIntoNewDbgInfoFormat == cl::boolOrDefault::BOU_UNSET)
+    LoadBitcodeIntoNewDbgInfoFormat = cl::boolOrDefault::BOU_TRUE;
+
   LLVMContext Context;
   Context.setDiagnosticHandler(
       std::make_unique<LLVMDisDiagnosticHandler>(argv[0]));
@@ -179,8 +188,13 @@ int main(int argc, char **argv) {
   }
 
   for (std::string InputFilename : InputFilenames) {
-    std::unique_ptr<MemoryBuffer> MB = ExitOnErr(
-        errorOrToExpected(MemoryBuffer::getFileOrSTDIN(InputFilename)));
+    ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrErr =
+        MemoryBuffer::getFileOrSTDIN(InputFilename);
+    if (std::error_code EC = BufferOrErr.getError()) {
+      WithColor::error() << InputFilename << ": " << EC.message() << '\n';
+      return 1;
+    }
+    std::unique_ptr<MemoryBuffer> MB = std::move(BufferOrErr.get());
 
     BitcodeFileContents IF = ExitOnErr(llvm::getBitcodeFileContents(*MB));
 
@@ -219,7 +233,7 @@ int main(int argc, char **argv) {
           FinalFilename = "-";
         } else {
           StringRef IFN = InputFilename;
-          FinalFilename = (IFN.endswith(".bc") ? IFN.drop_back(3) : IFN).str();
+          FinalFilename = (IFN.ends_with(".bc") ? IFN.drop_back(3) : IFN).str();
           if (N > 1)
             FinalFilename += std::string(".") + std::to_string(I);
           FinalFilename += ".ll";
@@ -243,8 +257,12 @@ int main(int argc, char **argv) {
 
       // All that llvm-dis does is write the assembly to a file.
       if (!DontPrint) {
-        if (M)
+        if (M) {
+          M->setIsNewDbgInfoFormat(WriteNewDbgInfoFormat);
+          if (WriteNewDbgInfoFormat)
+            M->removeDebugIntrinsicDeclarations();
           M->print(Out->os(), Annotator.get(), PreserveAssemblyUseListOrder);
+        }
         if (Index)
           Index->print(Out->os());
       }

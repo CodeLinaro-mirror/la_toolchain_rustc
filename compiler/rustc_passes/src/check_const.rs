@@ -7,17 +7,17 @@
 //! errors. We still look for those primitives in the MIR const-checker to ensure nothing slips
 //! through, but errors for structured control flow in a `const` should be emitted here.
 
-use rustc_attr as attr;
-use rustc_errors::struct_span_err;
-use rustc_hir as hir;
-use rustc_hir::def_id::LocalDefId;
+use rustc_hir::def_id::{LocalDefId, LocalModDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::ty;
-use rustc_middle::ty::query::Providers;
+use rustc_middle::query::Providers;
+use rustc_middle::span_bug;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::parse::feature_err;
-use rustc_span::{sym, Span, Symbol};
+use rustc_span::{Span, Symbol, sym};
+use {rustc_attr as attr, rustc_hir as hir};
+
+use crate::errors::SkippingConstChecks;
 
 /// An expression that is not *always* legal in a const context.
 #[derive(Clone, Copy)]
@@ -45,103 +45,23 @@ impl NonConstExpr {
 
             Self::Loop(ForLoop) | Self::Match(ForLoopDesugar) => &[sym::const_for],
 
-            Self::Match(TryDesugar) => &[sym::const_try],
+            Self::Match(TryDesugar(_)) => &[sym::const_try],
 
             // All other expressions are allowed.
-            Self::Loop(Loop | While) | Self::Match(Normal) => &[],
+            Self::Loop(Loop | While) | Self::Match(Normal | Postfix | FormatArgs) => &[],
         };
 
         Some(gates)
     }
 }
 
-fn check_mod_const_bodies(tcx: TyCtxt<'_>, module_def_id: LocalDefId) {
+fn check_mod_const_bodies(tcx: TyCtxt<'_>, module_def_id: LocalModDefId) {
     let mut vis = CheckConstVisitor::new(tcx);
-    tcx.hir().visit_item_likes_in_module(module_def_id, &mut vis.as_deep_visitor());
-    tcx.hir().visit_item_likes_in_module(module_def_id, &mut CheckConstTraitVisitor::new(tcx));
+    tcx.hir().visit_item_likes_in_module(module_def_id, &mut vis);
 }
 
 pub(crate) fn provide(providers: &mut Providers) {
     *providers = Providers { check_mod_const_bodies, ..*providers };
-}
-
-struct CheckConstTraitVisitor<'tcx> {
-    tcx: TyCtxt<'tcx>,
-}
-
-impl<'tcx> CheckConstTraitVisitor<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>) -> Self {
-        CheckConstTraitVisitor { tcx }
-    }
-}
-
-impl<'tcx> hir::itemlikevisit::ItemLikeVisitor<'tcx> for CheckConstTraitVisitor<'tcx> {
-    /// check for const trait impls, and errors if the impl uses provided/default functions
-    /// of the trait being implemented; as those provided functions can be non-const.
-    fn visit_item<'hir>(&mut self, item: &'hir hir::Item<'hir>) {
-        let _: Option<_> = try {
-            if let hir::ItemKind::Impl(ref imp) = item.kind {
-                if let hir::Constness::Const = imp.constness {
-                    let trait_def_id = imp.of_trait.as_ref()?.trait_def_id()?;
-                    let ancestors = self
-                        .tcx
-                        .trait_def(trait_def_id)
-                        .ancestors(self.tcx, item.def_id.to_def_id())
-                        .ok()?;
-                    let mut to_implement = Vec::new();
-
-                    for trait_item in self.tcx.associated_items(trait_def_id).in_definition_order()
-                    {
-                        if let ty::AssocItem {
-                            kind: ty::AssocKind::Fn,
-                            defaultness,
-                            def_id: trait_item_id,
-                            ..
-                        } = *trait_item
-                        {
-                            // we can ignore functions that do not have default bodies:
-                            // if those are unimplemented it will be catched by typeck.
-                            if !defaultness.has_value()
-                                || self
-                                    .tcx
-                                    .has_attr(trait_item_id, sym::default_method_body_is_const)
-                            {
-                                continue;
-                            }
-
-                            let is_implemented = ancestors
-                                .leaf_def(self.tcx, trait_item_id)
-                                .map(|node_item| !node_item.defining_node.is_from_trait())
-                                .unwrap_or(false);
-
-                            if !is_implemented {
-                                to_implement.push(self.tcx.item_name(trait_item_id).to_string());
-                            }
-                        }
-                    }
-
-                    // all nonconst trait functions (not marked with #[default_method_body_is_const])
-                    // must be implemented
-                    if !to_implement.is_empty() {
-                        self.tcx
-                            .sess
-                            .struct_span_err(
-                                item.span,
-                                "const trait implementations may not use non-const default functions",
-                            )
-                            .note(&format!("`{}` not implemented", to_implement.join("`, `")))
-                            .emit();
-                    }
-                }
-            }
-        };
-    }
-
-    fn visit_trait_item<'hir>(&mut self, _: &'hir hir::TraitItem<'hir>) {}
-
-    fn visit_impl_item<'hir>(&mut self, _: &'hir hir::ImplItem<'hir>) {}
-
-    fn visit_foreign_item<'hir>(&mut self, _: &'hir hir::ForeignItem<'hir>) {}
 }
 
 #[derive(Copy, Clone)]
@@ -157,6 +77,7 @@ impl<'tcx> CheckConstVisitor<'tcx> {
     }
 
     /// Emits an error when an unsupported expression is found in a const context.
+    #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
     fn const_check_violated(&self, expr: NonConstExpr, span: Span) {
         let Self { tcx, def_id, const_kind } = *self;
 
@@ -166,19 +87,19 @@ impl<'tcx> CheckConstVisitor<'tcx> {
         let is_feature_allowed = |feature_gate| {
             // All features require that the corresponding gate be enabled,
             // even if the function has `#[rustc_allow_const_fn_unstable(the_gate)]`.
-            if !tcx.features().enabled(feature_gate) {
+            if !tcx.features().active(feature_gate) {
                 return false;
             }
 
             // If `def_id` is `None`, we don't need to consider stability attributes.
             let def_id = match def_id {
-                Some(x) => x.to_def_id(),
+                Some(x) => x,
                 None => return true,
             };
 
             // If the function belongs to a trait, then it must enable the const_trait_impl
             // feature to use that trait function (with a const default body).
-            if tcx.trait_of_item(def_id).is_some() {
+            if tcx.trait_of_item(def_id.to_def_id()).is_some() {
                 return true;
             }
 
@@ -190,8 +111,8 @@ impl<'tcx> CheckConstVisitor<'tcx> {
 
             // However, we cannot allow stable `const fn`s to use unstable features without an explicit
             // opt-in via `rustc_allow_const_fn_unstable`.
-            attr::rustc_allow_const_fn_unstable(&tcx.sess, &tcx.get_attrs(def_id))
-                .any(|name| name == feature_gate)
+            let attrs = tcx.hir().attrs(tcx.local_def_id_to_hir_id(def_id));
+            attr::rustc_allow_const_fn_unstable(tcx.sess, attrs).any(|name| name == feature_gate)
         };
 
         match required_gates {
@@ -201,8 +122,8 @@ impl<'tcx> CheckConstVisitor<'tcx> {
             // `-Zunleash-the-miri-inside-of-you` only works for expressions that don't have a
             // corresponding feature gate. This encourages nightly users to use feature gates when
             // possible.
-            None if tcx.sess.opts.debugging_opts.unleash_the_miri_inside_of_you => {
-                tcx.sess.span_warn(span, "skipping const checks");
+            None if tcx.sess.opts.unstable_opts.unleash_the_miri_inside_of_you => {
+                tcx.dcx().emit_warn(SkippingConstChecks { span });
                 return;
             }
 
@@ -212,32 +133,33 @@ impl<'tcx> CheckConstVisitor<'tcx> {
         let const_kind =
             const_kind.expect("`const_check_violated` may only be called inside a const context");
 
-        let msg = format!("{} is not allowed in a `{}`", expr.name(), const_kind.keyword_name());
-
         let required_gates = required_gates.unwrap_or(&[]);
         let missing_gates: Vec<_> =
-            required_gates.iter().copied().filter(|&g| !features.enabled(g)).collect();
+            required_gates.iter().copied().filter(|&g| !features.active(g)).collect();
 
         match missing_gates.as_slice() {
-            [] => struct_span_err!(tcx.sess, span, E0744, "{}", msg).emit(),
+            [] => {
+                span_bug!(
+                    span,
+                    "we should not have reached this point, since `.await` is denied earlier"
+                );
+            }
 
             [missing_primary, ref missing_secondary @ ..] => {
-                let mut err = feature_err(&tcx.sess.parse_sess, *missing_primary, span, &msg);
+                let msg =
+                    format!("{} is not allowed in a `{}`", expr.name(), const_kind.keyword_name());
+                let mut err = feature_err(&tcx.sess, *missing_primary, span, msg);
 
                 // If multiple feature gates would be required to enable this expression, include
                 // them as help messages. Don't emit a separate error for each missing feature gate.
                 //
                 // FIXME(ecstaticmorse): Maybe this could be incorporated into `feature_err`? This
                 // is a pretty narrow case, however.
-                if tcx.sess.is_nightly_build() {
-                    for gate in missing_secondary {
-                        let note = format!(
-                            "add `#![feature({})]` to the crate attributes to enable",
-                            gate,
-                        );
-                        err.help(&note);
-                    }
-                }
+                tcx.disabled_nightly_features(
+                    &mut err,
+                    def_id.map(|id| tcx.local_def_id_to_hir_id(id)),
+                    missing_secondary.into_iter().map(|gate| (String::new(), *gate)),
+                );
 
                 err.emit();
             }
@@ -269,11 +191,16 @@ impl<'tcx> Visitor<'tcx> for CheckConstVisitor<'tcx> {
     }
 
     fn visit_anon_const(&mut self, anon: &'tcx hir::AnonConst) {
-        let kind = Some(hir::ConstContext::Const);
+        let kind = Some(hir::ConstContext::Const { inline: false });
         self.recurse_into(kind, None, |this| intravisit::walk_anon_const(this, anon));
     }
 
-    fn visit_body(&mut self, body: &'tcx hir::Body<'tcx>) {
+    fn visit_inline_const(&mut self, block: &'tcx hir::ConstBlock) {
+        let kind = Some(hir::ConstContext::Const { inline: true });
+        self.recurse_into(kind, None, |this| intravisit::walk_inline_const(this, block));
+    }
+
+    fn visit_body(&mut self, body: &hir::Body<'tcx>) {
         let owner = self.tcx.hir().body_owner_def_id(body.id());
         let kind = self.tcx.hir().body_const_context(owner);
         self.recurse_into(kind, Some(owner), |this| intravisit::walk_body(this, body));

@@ -1,5 +1,15 @@
 #![allow(non_snake_case)]
 
+use std::cell::RefCell;
+use std::ffi::{CStr, CString};
+use std::str::FromStr;
+use std::string::FromUtf8Error;
+
+use libc::c_uint;
+use rustc_data_structures::small_c_str::SmallCStr;
+use rustc_llvm::RustString;
+use rustc_target::abi::{Align, Size, WrappingRange};
+
 pub use self::AtomicRmwBinOp::*;
 pub use self::CallConv::*;
 pub use self::CodeGenOptSize::*;
@@ -7,14 +17,6 @@ pub use self::IntPredicate::*;
 pub use self::Linkage::*;
 pub use self::MetadataType::*;
 pub use self::RealPredicate::*;
-
-use libc::c_uint;
-use rustc_data_structures::small_c_str::SmallCStr;
-use rustc_llvm::RustString;
-use std::cell::RefCell;
-use std::ffi::{CStr, CString};
-use std::str::FromStr;
-use std::string::FromUtf8Error;
 
 pub mod archive_ro;
 pub mod diagnostic;
@@ -31,24 +33,91 @@ impl LLVMRustResult {
     }
 }
 
-pub fn EmitUWTableAttr(llfn: &Value, async_: bool) {
-    unsafe { LLVMRustEmitUWTableAttr(llfn, async_) }
-}
-
-pub fn AddFunctionAttrStringValue(llfn: &Value, idx: AttributePlace, attr: &CStr, value: &CStr) {
+pub fn AddFunctionAttributes<'ll>(llfn: &'ll Value, idx: AttributePlace, attrs: &[&'ll Attribute]) {
     unsafe {
-        LLVMRustAddFunctionAttrStringValue(llfn, idx.as_uint(), attr.as_ptr(), value.as_ptr())
+        LLVMRustAddFunctionAttributes(llfn, idx.as_uint(), attrs.as_ptr(), attrs.len());
     }
 }
 
-pub fn AddFunctionAttrString(llfn: &Value, idx: AttributePlace, attr: &CStr) {
+pub fn AddCallSiteAttributes<'ll>(
+    callsite: &'ll Value,
+    idx: AttributePlace,
+    attrs: &[&'ll Attribute],
+) {
     unsafe {
-        LLVMRustAddFunctionAttrStringValue(llfn, idx.as_uint(), attr.as_ptr(), std::ptr::null())
+        LLVMRustAddCallSiteAttributes(callsite, idx.as_uint(), attrs.as_ptr(), attrs.len());
     }
 }
 
-pub fn AddCallSiteAttrString(callsite: &Value, idx: AttributePlace, attr: &CStr) {
-    unsafe { LLVMRustAddCallSiteAttrString(callsite, idx.as_uint(), attr.as_ptr()) }
+pub fn CreateAttrStringValue<'ll>(llcx: &'ll Context, attr: &str, value: &str) -> &'ll Attribute {
+    unsafe {
+        LLVMCreateStringAttribute(
+            llcx,
+            attr.as_ptr().cast(),
+            attr.len().try_into().unwrap(),
+            value.as_ptr().cast(),
+            value.len().try_into().unwrap(),
+        )
+    }
+}
+
+pub fn CreateAttrString<'ll>(llcx: &'ll Context, attr: &str) -> &'ll Attribute {
+    unsafe {
+        LLVMCreateStringAttribute(
+            llcx,
+            attr.as_ptr().cast(),
+            attr.len().try_into().unwrap(),
+            std::ptr::null(),
+            0,
+        )
+    }
+}
+
+pub fn CreateAlignmentAttr(llcx: &Context, bytes: u64) -> &Attribute {
+    unsafe { LLVMRustCreateAlignmentAttr(llcx, bytes) }
+}
+
+pub fn CreateDereferenceableAttr(llcx: &Context, bytes: u64) -> &Attribute {
+    unsafe { LLVMRustCreateDereferenceableAttr(llcx, bytes) }
+}
+
+pub fn CreateDereferenceableOrNullAttr(llcx: &Context, bytes: u64) -> &Attribute {
+    unsafe { LLVMRustCreateDereferenceableOrNullAttr(llcx, bytes) }
+}
+
+pub fn CreateByValAttr<'ll>(llcx: &'ll Context, ty: &'ll Type) -> &'ll Attribute {
+    unsafe { LLVMRustCreateByValAttr(llcx, ty) }
+}
+
+pub fn CreateStructRetAttr<'ll>(llcx: &'ll Context, ty: &'ll Type) -> &'ll Attribute {
+    unsafe { LLVMRustCreateStructRetAttr(llcx, ty) }
+}
+
+pub fn CreateUWTableAttr(llcx: &Context, async_: bool) -> &Attribute {
+    unsafe { LLVMRustCreateUWTableAttr(llcx, async_) }
+}
+
+pub fn CreateAllocSizeAttr(llcx: &Context, size_arg: u32) -> &Attribute {
+    unsafe { LLVMRustCreateAllocSizeAttr(llcx, size_arg) }
+}
+
+pub fn CreateAllocKindAttr(llcx: &Context, kind_arg: AllocKindFlags) -> &Attribute {
+    unsafe { LLVMRustCreateAllocKindAttr(llcx, kind_arg.bits()) }
+}
+
+pub fn CreateRangeAttr(llcx: &Context, size: Size, range: WrappingRange) -> &Attribute {
+    let lower = range.start;
+    let upper = range.end.wrapping_add(1);
+    let lower_words = [lower as u64, (lower >> 64) as u64];
+    let upper_words = [upper as u64, (upper >> 64) as u64];
+    unsafe {
+        LLVMRustCreateRangeAttribute(
+            llcx,
+            size.bits().try_into().unwrap(),
+            lower_words.as_ptr(),
+            upper_words.as_ptr(),
+        )
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -85,6 +154,7 @@ impl FromStr for ArchiveKind {
             "bsd" => Ok(ArchiveKind::K_BSD),
             "darwin" => Ok(ArchiveKind::K_DARWIN),
             "coff" => Ok(ArchiveKind::K_COFF),
+            "aix_big" => Ok(ArchiveKind::K_AIXBIG),
             _ => Err(()),
         }
     }
@@ -114,12 +184,6 @@ pub fn SetUniqueComdat(llmod: &Module, val: &Value) {
     }
 }
 
-pub fn UnsetComdat(val: &Value) {
-    unsafe {
-        LLVMRustUnsetComdat(val);
-    }
-}
-
 pub fn SetUnnamedAddress(global: &Value, unnamed: UnnamedAddr) {
     unsafe {
         LLVMSetUnnamedAddress(global, unnamed);
@@ -132,25 +196,17 @@ pub fn set_thread_local_mode(global: &Value, mode: ThreadLocalMode) {
     }
 }
 
-impl Attribute {
-    pub fn apply_llfn(&self, idx: AttributePlace, llfn: &Value) {
-        unsafe { LLVMRustAddFunctionAttribute(llfn, idx.as_uint(), *self) }
+impl AttributeKind {
+    /// Create an LLVM Attribute with no associated value.
+    pub fn create_attr(self, llcx: &Context) -> &Attribute {
+        unsafe { LLVMRustCreateAttrNoValue(llcx, self) }
     }
+}
 
-    pub fn apply_callsite(&self, idx: AttributePlace, callsite: &Value) {
-        unsafe { LLVMRustAddCallSiteAttribute(callsite, idx.as_uint(), *self) }
-    }
-
-    pub fn unapply_llfn(&self, idx: AttributePlace, llfn: &Value) {
-        unsafe { LLVMRustRemoveFunctionAttributes(llfn, idx.as_uint(), *self) }
-    }
-
-    pub fn toggle_llfn(&self, idx: AttributePlace, llfn: &Value, set: bool) {
-        if set {
-            self.apply_llfn(idx, llfn);
-        } else {
-            self.unapply_llfn(idx, llfn);
-        }
+impl MemoryEffects {
+    /// Create an LLVM Attribute with these memory effects.
+    pub fn create_attr(self, llcx: &Context) -> &Attribute {
+        unsafe { LLVMRustCreateMemoryEffectsAttr(llcx, self) }
     }
 }
 
@@ -190,9 +246,9 @@ pub fn set_visibility(llglobal: &Value, visibility: Visibility) {
     }
 }
 
-pub fn set_alignment(llglobal: &Value, bytes: usize) {
+pub fn set_alignment(llglobal: &Value, align: Align) {
     unsafe {
-        ffi::LLVMSetAlignment(llglobal, bytes as c_uint);
+        ffi::LLVMSetAlignment(llglobal, align.bytes() as c_uint);
     }
 }
 

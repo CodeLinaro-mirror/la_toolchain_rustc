@@ -3,79 +3,63 @@ pub use self::plumbing::*;
 
 mod job;
 #[cfg(parallel_compiler)]
-pub use self::job::deadlock;
-pub use self::job::{print_query_stack, QueryInfo, QueryJob, QueryJobId, QueryJobInfo, QueryMap};
-
-mod caches;
-pub use self::caches::{
-    ArenaCacheSelector, CacheSelector, DefaultCacheSelector, QueryCache, QueryStorage,
+pub use self::job::break_query_cycles;
+pub use self::job::{
+    QueryInfo, QueryJob, QueryJobId, QueryJobInfo, QueryMap, print_query_stack, report_cycle,
 };
 
+mod caches;
+pub use self::caches::{DefIdCache, DefaultCache, QueryCache, SingleCache, VecCache};
+
 mod config;
-pub use self::config::{QueryConfig, QueryDescription, QueryVtable};
-
-use crate::dep_graph::{DepNodeIndex, HasDepContext, SerializedDepNodeIndex};
-
+use rustc_data_structures::stable_hasher::Hash64;
 use rustc_data_structures::sync::Lock;
-use rustc_data_structures::thin_vec::ThinVec;
-use rustc_errors::Diagnostic;
+use rustc_errors::DiagInner;
+use rustc_hir::def::DefKind;
+use rustc_macros::{Decodable, Encodable};
 use rustc_span::Span;
+use rustc_span::def_id::DefId;
+use thin_vec::ThinVec;
+
+pub use self::config::{HashResult, QueryConfig};
+use crate::dep_graph::{DepKind, DepNodeIndex, HasDepContext, SerializedDepNodeIndex};
 
 /// Description of a frame in the query stack.
 ///
 /// This is mostly used in case of cycles for error reporting.
 #[derive(Clone, Debug)]
 pub struct QueryStackFrame {
-    pub name: &'static str,
     pub description: String,
     span: Option<Span>,
-    /// The `DefKind` this query frame is associated with, if applicable.
-    ///
-    /// We can't use `rustc_hir::def::DefKind` because `rustc_hir` is not
-    /// available in `rustc_query_system`. Instead, we have a simplified
-    /// custom version of it, called [`SimpleDefKind`].
-    def_kind: Option<SimpleDefKind>,
+    pub def_id: Option<DefId>,
+    pub def_kind: Option<DefKind>,
+    /// A def-id that is extracted from a `Ty` in a query key
+    pub ty_def_id: Option<DefId>,
+    pub dep_kind: DepKind,
     /// This hash is used to deterministically pick
     /// a query to remove cycles in the parallel compiler.
     #[cfg(parallel_compiler)]
-    hash: u64,
-}
-
-/// A simplified version of `rustc_hir::def::DefKind`.
-///
-/// It was added to help improve cycle errors caused by recursive type aliases.
-/// As of August 2021, `rustc_query_system` cannot depend on `rustc_hir`
-/// because it would create a dependency cycle. So, instead, a simplified
-/// version of `DefKind` was added to `rustc_query_system`.
-///
-/// `DefKind`s are converted to `SimpleDefKind`s in `rustc_query_impl`.
-#[derive(Debug, Copy, Clone)]
-pub enum SimpleDefKind {
-    Struct,
-    Enum,
-    Union,
-    Trait,
-    TyAlias,
-    TraitAlias,
-
-    // FIXME: add more from `rustc_hir::def::DefKind` and then remove `Other`
-    Other,
+    hash: Hash64,
 }
 
 impl QueryStackFrame {
     #[inline]
     pub fn new(
-        name: &'static str,
         description: String,
         span: Option<Span>,
-        def_kind: Option<SimpleDefKind>,
-        _hash: impl FnOnce() -> u64,
+        def_id: Option<DefId>,
+        def_kind: Option<DefKind>,
+        dep_kind: DepKind,
+        ty_def_id: Option<DefId>,
+        _hash: impl FnOnce() -> Hash64,
     ) -> Self {
         Self {
-            name,
             description,
             span,
+            def_id,
             def_kind,
+            ty_def_id,
+            dep_kind,
             #[cfg(parallel_compiler)]
             hash: _hash(),
         }
@@ -102,13 +86,17 @@ pub struct QuerySideEffects {
     /// Stores any diagnostics emitted during query execution.
     /// These diagnostics will be re-emitted if we mark
     /// the query as green.
-    pub(super) diagnostics: ThinVec<Diagnostic>,
+    pub(super) diagnostics: ThinVec<DiagInner>,
 }
 
 impl QuerySideEffects {
-    pub fn is_empty(&self) -> bool {
+    /// Returns true if there might be side effects.
+    #[inline]
+    pub fn maybe_any(&self) -> bool {
         let QuerySideEffects { diagnostics } = self;
-        diagnostics.is_empty()
+        // Use `has_capacity` so that the destructor for `self.diagnostics` can be skipped
+        // if `maybe_any` is known to be false.
+        diagnostics.has_capacity()
     }
     pub fn append(&mut self, other: QuerySideEffects) {
         let QuerySideEffects { diagnostics } = self;
@@ -117,22 +105,22 @@ impl QuerySideEffects {
 }
 
 pub trait QueryContext: HasDepContext {
-    fn next_job_id(&self) -> QueryJobId;
+    fn next_job_id(self) -> QueryJobId;
 
     /// Get the query information from the TLS context.
-    fn current_query_job(&self) -> Option<QueryJobId>;
+    fn current_query_job(self) -> Option<QueryJobId>;
 
-    fn try_collect_active_jobs(&self) -> Option<QueryMap>;
+    fn collect_active_jobs(self) -> QueryMap;
 
     /// Load side effects associated to the node in the previous session.
-    fn load_side_effects(&self, prev_dep_node_index: SerializedDepNodeIndex) -> QuerySideEffects;
+    fn load_side_effects(self, prev_dep_node_index: SerializedDepNodeIndex) -> QuerySideEffects;
 
     /// Register diagnostics for the given node, for use in next session.
-    fn store_side_effects(&self, dep_node_index: DepNodeIndex, side_effects: QuerySideEffects);
+    fn store_side_effects(self, dep_node_index: DepNodeIndex, side_effects: QuerySideEffects);
 
     /// Register diagnostics for the given node, for use in next session.
     fn store_side_effects_for_anon_node(
-        &self,
+        self,
         dep_node_index: DepNodeIndex,
         side_effects: QuerySideEffects,
     );
@@ -141,9 +129,12 @@ pub trait QueryContext: HasDepContext {
     /// new query job while it executes. It returns the diagnostics
     /// captured during execution and the actual result.
     fn start_query<R>(
-        &self,
+        self,
         token: QueryJobId,
-        diagnostics: Option<&Lock<ThinVec<Diagnostic>>>,
+        depth_limit: bool,
+        diagnostics: Option<&Lock<ThinVec<DiagInner>>>,
         compute: impl FnOnce() -> R,
     ) -> R;
+
+    fn depth_limit_error(self, job: QueryJobId);
 }

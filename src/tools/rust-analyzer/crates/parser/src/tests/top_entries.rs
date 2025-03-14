@@ -65,7 +65,7 @@ fn macro_stmt() {
             MACRO_STMTS
               ERROR
                 SHEBANG "#!/usr/bin/rust"
-            error 0: expected expression
+            error 0: expected expression, item or let statement
         "##]],
     );
     check(
@@ -289,22 +289,24 @@ fn expr() {
         TopEntryPoint::Expr,
         "let _ = 0;",
         expect![[r#"
-        ERROR
-          LET_KW "let"
-          WHITESPACE " "
-          UNDERSCORE "_"
-          WHITESPACE " "
-          EQ "="
-          WHITESPACE " "
-          INT_NUMBER "0"
-          SEMICOLON ";"
-        error 0: expected expression
-    "#]],
+            ERROR
+              LET_EXPR
+                LET_KW "let"
+                WHITESPACE " "
+                WILDCARD_PAT
+                  UNDERSCORE "_"
+                WHITESPACE " "
+                EQ "="
+                WHITESPACE " "
+                LITERAL
+                  INT_NUMBER "0"
+              SEMICOLON ";"
+        "#]],
     );
 }
 
 #[track_caller]
 fn check(entry: TopEntryPoint, input: &str, expect: expect_test::Expect) {
-    let (parsed, _errors) = super::parse(entry, input);
+    let (parsed, _errors) = super::parse(entry, input, crate::Edition::CURRENT);
     expect.assert_eq(&parsed)
 }

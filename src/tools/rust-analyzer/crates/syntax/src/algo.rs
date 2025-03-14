@@ -22,7 +22,7 @@ pub fn ancestors_at_offset(
     offset: TextSize,
 ) -> impl Iterator<Item = SyntaxNode> {
     node.token_at_offset(offset)
-        .map(|token| token.ancestors())
+        .map(|token| token.parent_ancestors())
         .kmerge_by(|node1, node2| node1.text_range().len() < node2.text_range().len())
 }
 
@@ -120,7 +120,7 @@ pub struct TreeDiff {
 
 impl TreeDiff {
     pub fn into_text_edit(&self, builder: &mut TextEditBuilder) {
-        let _p = profile::span("into_text_edit");
+        let _p = tracing::info_span!("into_text_edit").entered();
 
         for (anchor, to) in &self.insertions {
             let offset = match anchor {
@@ -149,7 +149,7 @@ impl TreeDiff {
 ///
 /// This function tries to find a fine-grained diff.
 pub fn diff(from: &SyntaxNode, to: &SyntaxNode) -> TreeDiff {
-    let _p = profile::span("diff");
+    let _p = tracing::info_span!("diff").entered();
 
     let mut diff = TreeDiff {
         replacements: FxHashMap::default(),
@@ -207,7 +207,7 @@ pub fn diff(from: &SyntaxNode, to: &SyntaxNode) -> TreeDiff {
                             TreeDiffInsertPos::AsFirstChild(lhs.clone().into())
                         }
                     };
-                    diff.insertions.entry(insert_pos).or_insert_with(Vec::new).push(element);
+                    diff.insertions.entry(insert_pos).or_default().push(element);
                 }
                 (Some(element), None) => {
                     cov_mark::hit!(diff_delete);
@@ -239,7 +239,7 @@ pub fn diff(from: &SyntaxNode, to: &SyntaxNode) -> TreeDiff {
                             TreeDiffInsertPos::AsFirstChild(lhs.clone().into())
                         };
 
-                        diff.insertions.entry(insert_pos).or_insert_with(Vec::new).extend(drain);
+                        diff.insertions.entry(insert_pos).or_default().extend(drain);
                         rhs_children = rhs_children_clone;
                     } else {
                         go(diff, lhs_ele, rhs_ele);
@@ -255,7 +255,7 @@ pub fn diff(from: &SyntaxNode, to: &SyntaxNode) -> TreeDiff {
 mod tests {
     use expect_test::{expect, Expect};
     use itertools::Itertools;
-    use parser::SyntaxKind;
+    use parser::{Edition, SyntaxKind};
     use text_edit::TextEdit;
 
     use crate::{AstNode, SyntaxElement};
@@ -607,8 +607,8 @@ fn main() {
     }
 
     fn check_diff(from: &str, to: &str, expected_diff: Expect) {
-        let from_node = crate::SourceFile::parse(from).tree().syntax().clone();
-        let to_node = crate::SourceFile::parse(to).tree().syntax().clone();
+        let from_node = crate::SourceFile::parse(from, Edition::CURRENT).tree().syntax().clone();
+        let to_node = crate::SourceFile::parse(to, Edition::CURRENT).tree().syntax().clone();
         let diff = super::diff(&from_node, &to_node);
 
         let line_number =
@@ -616,7 +616,7 @@ fn main() {
 
         let fmt_syntax = |syn: &SyntaxElement| match syn.kind() {
             SyntaxKind::WHITESPACE => format!("{:?}", syn.to_string()),
-            _ => format!("{}", syn),
+            _ => format!("{syn}"),
         };
 
         let insertions =
@@ -637,17 +637,16 @@ fn main() {
             .iter()
             .sorted_by_key(|(syntax, _)| syntax.text_range().start())
             .format_with("\n", |(k, v), f| {
-                f(&format!("Line {}: {:?} -> {}", line_number(k), k, fmt_syntax(v)))
+                f(&format!("Line {}: {k:?} -> {}", line_number(k), fmt_syntax(v)))
             });
 
         let deletions = diff
             .deletions
             .iter()
-            .format_with("\n", |v, f| f(&format!("Line {}: {}", line_number(v), &fmt_syntax(v))));
+            .format_with("\n", |v, f| f(&format!("Line {}: {}", line_number(v), fmt_syntax(v))));
 
         let actual = format!(
-            "insertions:\n\n{}\n\nreplacements:\n\n{}\n\ndeletions:\n\n{}\n",
-            insertions, replacements, deletions
+            "insertions:\n\n{insertions}\n\nreplacements:\n\n{replacements}\n\ndeletions:\n\n{deletions}\n"
         );
         expected_diff.assert_eq(&actual);
 

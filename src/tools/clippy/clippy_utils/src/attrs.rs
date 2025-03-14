@@ -1,11 +1,16 @@
 use rustc_ast::{ast, attr};
 use rustc_errors::Applicability;
+use rustc_lexer::TokenKind;
+use rustc_lint::LateContext;
+use rustc_middle::ty::{AdtDef, TyCtxt};
 use rustc_session::Session;
-use rustc_span::sym;
+use rustc_span::{Span, sym};
 use std::str::FromStr;
 
+use crate::source::SpanRangeExt;
+use crate::tokenize_with_text;
+
 /// Deprecation status of attributes known by Clippy.
-#[allow(dead_code)]
 pub enum DeprecationStatus {
     /// Attribute is deprecated
     Deprecated,
@@ -22,6 +27,7 @@ pub const BUILTIN_ATTRIBUTES: &[(&str, DeprecationStatus)] = &[
     ("cyclomatic_complexity", DeprecationStatus::Replaced("cognitive_complexity")),
     ("dump",                  DeprecationStatus::None),
     ("msrv",                  DeprecationStatus::None),
+    ("has_significant_drop",  DeprecationStatus::None),
 ];
 
 pub struct LimitStack {
@@ -58,8 +64,8 @@ pub fn get_attr<'a>(
     name: &'static str,
 ) -> impl Iterator<Item = &'a ast::Attribute> {
     attrs.iter().filter(move |attr| {
-        let attr = if let ast::AttrKind::Normal(ref attr, _) = attr.kind {
-            attr
+        let attr = if let ast::AttrKind::Normal(ref normal) = attr.kind {
+            &normal.item
         } else {
             return false;
         };
@@ -76,12 +82,14 @@ pub fn get_attr<'a>(
                 })
                 .map_or_else(
                     || {
-                        sess.span_err(attr_segments[1].ident.span, "usage of unknown attribute");
+                        sess.dcx()
+                            .span_err(attr_segments[1].ident.span, "usage of unknown attribute");
                         false
                     },
                     |deprecation_status| {
-                        let mut diag =
-                            sess.struct_span_err(attr_segments[1].ident.span, "usage of deprecated attribute");
+                        let mut diag = sess
+                            .dcx()
+                            .struct_span_err(attr_segments[1].ident.span, "usage of deprecated attribute");
                         match *deprecation_status {
                             DeprecationStatus::Deprecated => {
                                 diag.emit();
@@ -91,7 +99,7 @@ pub fn get_attr<'a>(
                                 diag.span_suggestion(
                                     attr_segments[1].ident.span,
                                     "consider using",
-                                    new_name.to_string(),
+                                    new_name,
                                     Applicability::MachineApplicable,
                                 );
                                 diag.emit();
@@ -116,39 +124,40 @@ fn parse_attrs<F: FnMut(u64)>(sess: &Session, attrs: &[ast::Attribute], name: &'
             if let Ok(value) = FromStr::from_str(value.as_str()) {
                 f(value);
             } else {
-                sess.span_err(attr.span, "not a number");
+                sess.dcx().span_err(attr.span, "not a number");
             }
         } else {
-            sess.span_err(attr.span, "bad clippy attribute");
+            sess.dcx().span_err(attr.span, "bad clippy attribute");
         }
     }
 }
 
-pub fn get_unique_inner_attr(sess: &Session, attrs: &[ast::Attribute], name: &'static str) -> Option<ast::Attribute> {
-    let mut unique_attr = None;
+pub fn get_unique_attr<'a>(
+    sess: &'a Session,
+    attrs: &'a [ast::Attribute],
+    name: &'static str,
+) -> Option<&'a ast::Attribute> {
+    let mut unique_attr: Option<&ast::Attribute> = None;
     for attr in get_attr(sess, attrs, name) {
-        match attr.style {
-            ast::AttrStyle::Inner if unique_attr.is_none() => unique_attr = Some(attr.clone()),
-            ast::AttrStyle::Inner => {
-                sess.struct_span_err(attr.span, &format!("`{}` is defined multiple times", name))
-                    .span_note(unique_attr.as_ref().unwrap().span, "first definition found here")
-                    .emit();
-            },
-            ast::AttrStyle::Outer => {
-                sess.span_err(attr.span, &format!("`{}` cannot be an outer attribute", name));
-            },
+        if let Some(duplicate) = unique_attr {
+            sess.dcx()
+                .struct_span_err(attr.span, format!("`{name}` is defined multiple times"))
+                .with_span_note(duplicate.span, "first definition found here")
+                .emit();
+        } else {
+            unique_attr = Some(attr);
         }
     }
     unique_attr
 }
 
-/// Return true if the attributes contain any of `proc_macro`,
+/// Returns true if the attributes contain any of `proc_macro`,
 /// `proc_macro_derive` or `proc_macro_attribute`, false otherwise
-pub fn is_proc_macro(sess: &Session, attrs: &[ast::Attribute]) -> bool {
-    attrs.iter().any(|attr| sess.is_proc_macro_attr(attr))
+pub fn is_proc_macro(attrs: &[ast::Attribute]) -> bool {
+    attrs.iter().any(rustc_ast::Attribute::is_proc_macro_attr)
 }
 
-/// Return true if the attributes contain `#[doc(hidden)]`
+/// Returns true if the attributes contain `#[doc(hidden)]`
 pub fn is_doc_hidden(attrs: &[ast::Attribute]) -> bool {
     attrs
         .iter()
@@ -157,7 +166,36 @@ pub fn is_doc_hidden(attrs: &[ast::Attribute]) -> bool {
         .any(|l| attr::list_contains_name(&l, sym::hidden))
 }
 
-/// Return true if the attributes contain `#[unstable]`
-pub fn is_unstable(attrs: &[ast::Attribute]) -> bool {
-    attrs.iter().any(|attr| attr.has_name(sym::unstable))
+pub fn has_non_exhaustive_attr(tcx: TyCtxt<'_>, adt: AdtDef<'_>) -> bool {
+    adt.is_variant_list_non_exhaustive()
+        || tcx.has_attr(adt.did(), sym::non_exhaustive)
+        || adt.variants().iter().any(|variant_def| {
+            variant_def.is_field_list_non_exhaustive() || tcx.has_attr(variant_def.def_id, sym::non_exhaustive)
+        })
+        || adt
+            .all_fields()
+            .any(|field_def| tcx.has_attr(field_def.did, sym::non_exhaustive))
+}
+
+/// Checks if the given span contains a `#[cfg(..)]` attribute
+pub fn span_contains_cfg(cx: &LateContext<'_>, s: Span) -> bool {
+    s.check_source_text(cx, |src| {
+        let mut iter = tokenize_with_text(src);
+
+        // Search for the token sequence [`#`, `[`, `cfg`]
+        while iter.any(|(t, ..)| matches!(t, TokenKind::Pound)) {
+            let mut iter = iter.by_ref().skip_while(|(t, ..)| {
+                matches!(
+                    t,
+                    TokenKind::Whitespace | TokenKind::LineComment { .. } | TokenKind::BlockComment { .. }
+                )
+            });
+            if matches!(iter.next(), Some((TokenKind::OpenBracket, ..)))
+                && matches!(iter.next(), Some((TokenKind::Ident, "cfg", _)))
+            {
+                return true;
+            }
+        }
+        false
+    })
 }

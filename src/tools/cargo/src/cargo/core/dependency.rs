@@ -1,12 +1,15 @@
 use cargo_platform::Platform;
-use log::trace;
 use semver::VersionReq;
 use serde::ser;
 use serde::Serialize;
+use std::borrow::Cow;
+use std::fmt;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
+use tracing::trace;
 
-use crate::core::{PackageId, SourceId, Summary};
+use crate::core::compiler::{CompileKind, CompileTarget};
+use crate::core::{CliUnstable, Feature, Features, PackageId, SourceId, Summary};
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
 use crate::util::OptVersionReq;
@@ -15,7 +18,7 @@ use crate::util::OptVersionReq;
 /// Cheap to copy.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct Dependency {
-    inner: Rc<Inner>,
+    inner: Arc<Inner>,
 }
 
 /// The data underlying a `Dependency`.
@@ -40,6 +43,8 @@ struct Inner {
     public: bool,
     default_features: bool,
     features: Vec<InternedString>,
+    // The presence of this information turns a dependency into an artifact dependency.
+    artifact: Option<Artifact>,
 
     // This dependency should be used only for this platform.
     // `None` means *all platforms*.
@@ -47,47 +52,32 @@ struct Inner {
 }
 
 #[derive(Serialize)]
-struct SerializedDependency<'a> {
-    name: &'a str,
+pub struct SerializedDependency {
+    name: InternedString,
     source: SourceId,
     req: String,
     kind: DepKind,
-    rename: Option<&'a str>,
+    rename: Option<InternedString>,
 
     optional: bool,
     uses_default_features: bool,
-    features: &'a [InternedString],
-    target: Option<&'a Platform>,
+    features: Vec<InternedString>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<Artifact>,
+    target: Option<Platform>,
     /// The registry URL this dependency is from.
     /// If None, then it comes from the default registry (crates.io).
-    registry: Option<&'a str>,
+    registry: Option<String>,
 
     /// The file system path for a local path dependency.
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<PathBuf>,
-}
 
-impl ser::Serialize for Dependency {
-    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: ser::Serializer,
-    {
-        let registry_id = self.registry_id();
-        SerializedDependency {
-            name: &*self.package_name(),
-            source: self.source_id(),
-            req: self.version_req().to_string(),
-            kind: self.kind(),
-            optional: self.is_optional(),
-            uses_default_features: self.uses_default_features(),
-            features: self.features(),
-            target: self.platform(),
-            rename: self.explicit_name_in_toml().map(|s| s.as_str()),
-            registry: registry_id.as_ref().map(|sid| sid.url().as_str()),
-            path: self.source_id().local_path(),
-        }
-        .serialize(s)
-    }
+    /// `public` flag is unset if `-Zpublic-dependency` is not enabled
+    ///
+    /// Once that feature is stabilized, `public` will not need to be `Option`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public: Option<bool>,
 }
 
 #[derive(PartialEq, Eq, Hash, Ord, PartialOrd, Clone, Debug, Copy)]
@@ -95,6 +85,16 @@ pub enum DepKind {
     Normal,
     Development,
     Build,
+}
+
+impl DepKind {
+    pub fn kind_table(&self) -> &'static str {
+        match self {
+            DepKind::Normal => "dependencies",
+            DepKind::Development => "dev-dependencies",
+            DepKind::Build => "build-dependencies",
+        }
+    }
 }
 
 impl ser::Serialize for DepKind {
@@ -134,7 +134,7 @@ impl Dependency {
 
         let mut ret = Dependency::new_override(name, source_id);
         {
-            let ptr = Rc::make_mut(&mut ret.inner);
+            let ptr = Arc::make_mut(&mut ret.inner);
             ptr.only_match_name = false;
             ptr.req = version_req;
             ptr.specified_req = specified_req;
@@ -145,7 +145,7 @@ impl Dependency {
     pub fn new_override(name: InternedString, source_id: SourceId) -> Dependency {
         assert!(!name.is_empty());
         Dependency {
-            inner: Rc::new(Inner {
+            inner: Arc::new(Inner {
                 name,
                 source_id,
                 registry_id: None,
@@ -159,7 +159,36 @@ impl Dependency {
                 specified_req: false,
                 platform: None,
                 explicit_name_in_toml: None,
+                artifact: None,
             }),
+        }
+    }
+
+    pub fn serialized(
+        &self,
+        unstable_flags: &CliUnstable,
+        features: &Features,
+    ) -> SerializedDependency {
+        SerializedDependency {
+            name: self.package_name(),
+            source: self.source_id(),
+            req: self.version_req().to_string(),
+            kind: self.kind(),
+            optional: self.is_optional(),
+            uses_default_features: self.uses_default_features(),
+            features: self.features().to_vec(),
+            target: self.inner.platform.clone(),
+            rename: self.explicit_name_in_toml(),
+            registry: self.registry_id().as_ref().map(|sid| sid.url().to_string()),
+            path: self.source_id().local_path(),
+            artifact: self.inner.artifact.clone(),
+            public: if unstable_flags.public_dependency
+                || features.is_enabled(Feature::public_dependency())
+            {
+                Some(self.inner.public)
+            } else {
+                None
+            },
         }
     }
 
@@ -222,7 +251,7 @@ impl Dependency {
     }
 
     pub fn set_registry_id(&mut self, registry_id: SourceId) -> &mut Dependency {
-        Rc::make_mut(&mut self.inner).registry_id = Some(registry_id);
+        Arc::make_mut(&mut self.inner).registry_id = Some(registry_id);
         self
     }
 
@@ -240,7 +269,7 @@ impl Dependency {
             // Setting 'public' only makes sense for normal dependencies
             assert_eq!(self.kind(), DepKind::Normal);
         }
-        Rc::make_mut(&mut self.inner).public = public;
+        Arc::make_mut(&mut self.inner).public = public;
         self
     }
 
@@ -267,7 +296,7 @@ impl Dependency {
             // Setting 'public' only makes sense for normal dependencies
             assert_eq!(kind, DepKind::Normal);
         }
-        Rc::make_mut(&mut self.inner).kind = kind;
+        Arc::make_mut(&mut self.inner).kind = kind;
         self
     }
 
@@ -276,36 +305,36 @@ impl Dependency {
         &mut self,
         features: impl IntoIterator<Item = impl Into<InternedString>>,
     ) -> &mut Dependency {
-        Rc::make_mut(&mut self.inner).features = features.into_iter().map(|s| s.into()).collect();
+        Arc::make_mut(&mut self.inner).features = features.into_iter().map(|s| s.into()).collect();
         self
     }
 
     /// Sets whether the dependency requests default features of the package.
     pub fn set_default_features(&mut self, default_features: bool) -> &mut Dependency {
-        Rc::make_mut(&mut self.inner).default_features = default_features;
+        Arc::make_mut(&mut self.inner).default_features = default_features;
         self
     }
 
     /// Sets whether the dependency is optional.
     pub fn set_optional(&mut self, optional: bool) -> &mut Dependency {
-        Rc::make_mut(&mut self.inner).optional = optional;
+        Arc::make_mut(&mut self.inner).optional = optional;
         self
     }
 
     /// Sets the source ID for this dependency.
     pub fn set_source_id(&mut self, id: SourceId) -> &mut Dependency {
-        Rc::make_mut(&mut self.inner).source_id = id;
+        Arc::make_mut(&mut self.inner).source_id = id;
         self
     }
 
     /// Sets the version requirement for this dependency.
-    pub fn set_version_req(&mut self, req: VersionReq) -> &mut Dependency {
-        Rc::make_mut(&mut self.inner).req = OptVersionReq::Req(req);
+    pub fn set_version_req(&mut self, req: OptVersionReq) -> &mut Dependency {
+        Arc::make_mut(&mut self.inner).req = req;
         self
     }
 
     pub fn set_platform(&mut self, platform: Option<Platform>) -> &mut Dependency {
-        Rc::make_mut(&mut self.inner).platform = platform;
+        Arc::make_mut(&mut self.inner).platform = platform;
         self
     }
 
@@ -313,7 +342,7 @@ impl Dependency {
         &mut self,
         name: impl Into<InternedString>,
     ) -> &mut Dependency {
-        Rc::make_mut(&mut self.inner).explicit_name_in_toml = Some(name.into());
+        Arc::make_mut(&mut self.inner).explicit_name_in_toml = Some(name.into());
         self
     }
 
@@ -327,15 +356,13 @@ impl Dependency {
             self.source_id(),
             id
         );
-        let me = Rc::make_mut(&mut self.inner);
+        let me = Arc::make_mut(&mut self.inner);
         me.req.lock_to(id.version());
 
         // Only update the `precise` of this source to preserve other
         // information about dependency's source which may not otherwise be
         // tested during equality/hashing.
-        me.source_id = me
-            .source_id
-            .with_precise(id.source_id().precise().map(|s| s.to_string()));
+        me.source_id = me.source_id.with_precise_from(id.source_id());
         self
     }
 
@@ -344,7 +371,7 @@ impl Dependency {
     /// Mainly used in dependency patching like `[patch]` or `[replace]`, which
     /// doesn't need to lock the entire dependency to a specific [`PackageId`].
     pub fn lock_version(&mut self, version: &semver::Version) -> &mut Dependency {
-        let me = Rc::make_mut(&mut self.inner);
+        let me = Arc::make_mut(&mut self.inner);
         me.req.lock_to(version);
         self
     }
@@ -385,6 +412,14 @@ impl Dependency {
         self.matches_id(sum.package_id())
     }
 
+    pub fn matches_prerelease(&self, sum: &Summary) -> bool {
+        let id = sum.package_id();
+        self.inner.name == id.name()
+            && (self.inner.only_match_name
+                || (self.inner.req.matches_prerelease(id.version())
+                    && self.inner.source_id == id.source_id()))
+    }
+
     /// Returns `true` if the package (`id`) can fulfill this dependency request.
     pub fn matches_ignoring_source(&self, id: PackageId) -> bool {
         self.package_name() == id.name() && self.version_req().matches(id.version())
@@ -402,5 +437,226 @@ impl Dependency {
             self.set_source_id(replace_with);
         }
         self
+    }
+
+    pub(crate) fn set_artifact(&mut self, artifact: Artifact) {
+        Arc::make_mut(&mut self.inner).artifact = Some(artifact);
+    }
+
+    pub(crate) fn artifact(&self) -> Option<&Artifact> {
+        self.inner.artifact.as_ref()
+    }
+
+    /// Dependencies are potential rust libs if they are not artifacts or they are an
+    /// artifact which allows to be seen as library.
+    /// Previously, every dependency was potentially seen as library.
+    pub(crate) fn maybe_lib(&self) -> bool {
+        self.artifact().map(|a| a.is_lib).unwrap_or(true)
+    }
+}
+
+/// The presence of an artifact turns an ordinary dependency into an Artifact dependency.
+/// As such, it will build one or more different artifacts of possibly various kinds
+/// for making them available at build time for rustc invocations or runtime
+/// for build scripts.
+///
+/// This information represents a requirement in the package this dependency refers to.
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct Artifact {
+    inner: Arc<Vec<ArtifactKind>>,
+    is_lib: bool,
+    target: Option<ArtifactTarget>,
+}
+
+#[derive(Serialize)]
+pub struct SerializedArtifact<'a> {
+    kinds: &'a [ArtifactKind],
+    lib: bool,
+    target: Option<&'a str>,
+}
+
+impl ser::Serialize for Artifact {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        SerializedArtifact {
+            kinds: self.kinds(),
+            lib: self.is_lib,
+            target: self.target.as_ref().map(ArtifactTarget::as_str),
+        }
+        .serialize(s)
+    }
+}
+
+impl Artifact {
+    pub(crate) fn parse(
+        artifacts: &[impl AsRef<str>],
+        is_lib: bool,
+        target: Option<&str>,
+    ) -> CargoResult<Self> {
+        let kinds = ArtifactKind::validate(
+            artifacts
+                .iter()
+                .map(|s| ArtifactKind::parse(s.as_ref()))
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
+        Ok(Artifact {
+            inner: Arc::new(kinds),
+            is_lib,
+            target: target.map(ArtifactTarget::parse).transpose()?,
+        })
+    }
+
+    pub(crate) fn kinds(&self) -> &[ArtifactKind] {
+        &self.inner
+    }
+
+    pub(crate) fn is_lib(&self) -> bool {
+        self.is_lib
+    }
+
+    pub(crate) fn target(&self) -> Option<ArtifactTarget> {
+        self.target
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Ord, PartialOrd, Debug)]
+pub enum ArtifactTarget {
+    /// Only applicable to build-dependencies, causing them to be built
+    /// for the given target (i.e. via `--target <triple>`) instead of for the host.
+    /// Has no effect on non-build dependencies.
+    BuildDependencyAssumeTarget,
+    /// The name of the platform triple, like `x86_64-apple-darwin`, that this
+    /// artifact will always be built for, no matter if it is a build,
+    /// normal or dev dependency.
+    Force(CompileTarget),
+}
+
+impl ArtifactTarget {
+    pub fn parse(target: &str) -> CargoResult<ArtifactTarget> {
+        Ok(match target {
+            "target" => ArtifactTarget::BuildDependencyAssumeTarget,
+            name => ArtifactTarget::Force(CompileTarget::new(name)?),
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            ArtifactTarget::BuildDependencyAssumeTarget => "target",
+            ArtifactTarget::Force(target) => target.rustc_target().as_str(),
+        }
+    }
+
+    pub fn to_compile_kind(&self) -> Option<CompileKind> {
+        self.to_compile_target().map(CompileKind::Target)
+    }
+
+    pub fn to_compile_target(&self) -> Option<CompileTarget> {
+        match self {
+            ArtifactTarget::BuildDependencyAssumeTarget => None,
+            ArtifactTarget::Force(target) => Some(*target),
+        }
+    }
+
+    pub(crate) fn to_resolved_compile_kind(
+        &self,
+        root_unit_compile_kind: CompileKind,
+    ) -> CompileKind {
+        match self {
+            ArtifactTarget::Force(target) => CompileKind::Target(*target),
+            ArtifactTarget::BuildDependencyAssumeTarget => root_unit_compile_kind,
+        }
+    }
+
+    pub(crate) fn to_resolved_compile_target(
+        &self,
+        root_unit_compile_kind: CompileKind,
+    ) -> Option<CompileTarget> {
+        match self.to_resolved_compile_kind(root_unit_compile_kind) {
+            CompileKind::Host => None,
+            CompileKind::Target(target) => Some(target),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Ord, PartialOrd, Debug)]
+pub enum ArtifactKind {
+    /// We represent all binaries in this dependency
+    AllBinaries,
+    /// We represent a single binary
+    SelectedBinary(InternedString),
+    Cdylib,
+    Staticlib,
+}
+
+impl ser::Serialize for ArtifactKind {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        self.as_str().serialize(s)
+    }
+}
+
+impl fmt::Display for ArtifactKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.as_str())
+    }
+}
+
+impl ArtifactKind {
+    /// Returns a string of crate type of the artifact being built.
+    ///
+    /// Note that the name of `SelectedBinary` would be dropped and displayed as `bin`.
+    pub fn crate_type(&self) -> &'static str {
+        match self {
+            ArtifactKind::AllBinaries | ArtifactKind::SelectedBinary(_) => "bin",
+            ArtifactKind::Cdylib => "cdylib",
+            ArtifactKind::Staticlib => "staticlib",
+        }
+    }
+
+    pub fn as_str(&self) -> Cow<'static, str> {
+        match *self {
+            ArtifactKind::SelectedBinary(name) => format!("bin:{}", name.as_str()).into(),
+            _ => self.crate_type().into(),
+        }
+    }
+
+    pub fn parse(kind: &str) -> CargoResult<Self> {
+        Ok(match kind {
+            "bin" => ArtifactKind::AllBinaries,
+            "cdylib" => ArtifactKind::Cdylib,
+            "staticlib" => ArtifactKind::Staticlib,
+            _ => {
+                return kind
+                    .strip_prefix("bin:")
+                    .map(|bin_name| ArtifactKind::SelectedBinary(InternedString::new(bin_name)))
+                    .ok_or_else(|| anyhow::anyhow!("'{}' is not a valid artifact specifier", kind))
+            }
+        })
+    }
+
+    fn validate(kinds: Vec<ArtifactKind>) -> CargoResult<Vec<ArtifactKind>> {
+        if kinds.iter().any(|k| matches!(k, ArtifactKind::AllBinaries))
+            && kinds
+                .iter()
+                .any(|k| matches!(k, ArtifactKind::SelectedBinary(_)))
+        {
+            anyhow::bail!("Cannot specify both 'bin' and 'bin:<name>' binary artifacts, as 'bin' selects all available binaries.");
+        }
+        let mut kinds_without_dupes = kinds.clone();
+        kinds_without_dupes.sort();
+        kinds_without_dupes.dedup();
+        let num_dupes = kinds.len() - kinds_without_dupes.len();
+        if num_dupes != 0 {
+            anyhow::bail!(
+                "Found {} duplicate binary artifact{}",
+                num_dupes,
+                (num_dupes > 1).then(|| "s").unwrap_or("")
+            );
+        }
+        Ok(kinds)
     }
 }

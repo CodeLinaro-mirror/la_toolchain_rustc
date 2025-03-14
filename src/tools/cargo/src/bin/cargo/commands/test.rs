@@ -1,90 +1,91 @@
 use crate::command_prelude::*;
-use anyhow::Error;
 use cargo::ops;
 
-pub fn cli() -> App {
+pub fn cli() -> Command {
     subcommand("test")
         // Subcommand aliases are handled in `aliased_command()`.
         // .alias("t")
-        .trailing_var_arg(true)
         .about("Execute all unit and integration tests and build examples of a local package")
         .arg(
             Arg::new("TESTNAME")
+                .action(ArgAction::Set)
                 .help("If specified, only run tests containing this string in their names"),
         )
         .arg(
             Arg::new("args")
+                .value_name("ARGS")
                 .help("Arguments for the test binary")
-                .multiple_values(true)
+                .num_args(0..)
                 .last(true),
         )
+        .arg(flag("no-run", "Compile, but don't run tests"))
+        .arg(flag("no-fail-fast", "Run all tests regardless of failure"))
+        .arg_future_incompat_report()
+        .arg_message_format()
         .arg(
-            opt(
+            flag(
                 "quiet",
                 "Display one character per test instead of one line",
             )
             .short('q'),
         )
-        .arg_targets_all(
-            "Test only this package's library unit tests",
-            "Test only the specified binary",
-            "Test all binaries",
-            "Test only the specified example",
-            "Test all examples",
-            "Test only the specified test target",
-            "Test all tests",
-            "Test only the specified bench target",
-            "Test all benches",
-            "Test all targets",
-        )
-        .arg(opt("doc", "Test only this library's documentation"))
-        .arg(opt("no-run", "Compile, but don't run tests"))
-        .arg(opt("no-fail-fast", "Run all tests regardless of failure"))
         .arg_package_spec(
             "Package to run tests for",
             "Test all packages in the workspace",
             "Exclude packages from the test",
         )
+        .arg_targets_all(
+            "Test only this package's library",
+            "Test only the specified binary",
+            "Test all binaries",
+            "Test only the specified example",
+            "Test all examples",
+            "Test only the specified test target",
+            "Test all test targets",
+            "Test only the specified bench target",
+            "Test all bench targets",
+            "Test all targets (does not include doctests)",
+        )
+        .arg(
+            flag("doc", "Test only this library's documentation")
+                .help_heading(heading::TARGET_SELECTION),
+        )
+        .arg_features()
         .arg_jobs()
+        .arg_unsupported_keep_going()
         .arg_release("Build artifacts in release mode, with optimizations")
         .arg_profile("Build artifacts with the specified profile")
-        .arg_features()
         .arg_target_triple("Build for the target triple")
         .arg_target_dir()
-        .arg_manifest_path()
-        .arg_ignore_rust_version()
-        .arg_message_format()
         .arg_unit_graph()
-        .arg_future_incompat_report()
         .arg_timings()
-        .after_help(
-            "Run `cargo help test` for more detailed information.\n\
-             Run `cargo test -- --help` for test binary options.\n",
-        )
+        .arg_manifest_path()
+        .arg_lockfile_path()
+        .arg_ignore_rust_version()
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help test</>` for more detailed information.\n\
+             Run `<cyan,bold>cargo test -- --help</>` for test binary options.\n",
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
-    let ws = args.workspace(config)?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let ws = args.workspace(gctx)?;
 
-    let mut compile_opts = args.compile_options(
-        config,
-        CompileMode::Test,
-        Some(&ws),
-        ProfileChecking::Custom,
-    )?;
+    let mut compile_opts =
+        args.compile_options(gctx, CompileMode::Test, Some(&ws), ProfileChecking::Custom)?;
 
     compile_opts.build_config.requested_profile =
-        args.get_profile_name(config, "test", ProfileChecking::Custom)?;
+        args.get_profile_name("test", ProfileChecking::Custom)?;
 
     // `TESTNAME` is actually an argument of the test binary, but it's
     // important, so we explicitly mention it and reconfigure.
-    let test_name = args.value_of("TESTNAME");
-    let test_args = args.value_of("TESTNAME").into_iter();
-    let test_args = test_args.chain(args.values_of("args").unwrap_or_default());
-    let test_args = test_args.collect::<Vec<_>>();
+    let test_name = args.get_one::<String>("TESTNAME");
+    let test_args = args.get_one::<String>("TESTNAME").into_iter();
+    let test_args = test_args.chain(args.get_many::<String>("args").unwrap_or_default());
+    let test_args = test_args.map(String::as_str).collect::<Vec<_>>();
 
-    let no_run = args.is_present("no-run");
-    let doc = args.is_present("doc");
+    let no_run = args.flag("no-run");
+    let doc = args.flag("doc");
     if doc {
         if compile_opts.filter.is_specific() {
             return Err(
@@ -106,22 +107,9 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
 
     let ops = ops::TestOptions {
         no_run,
-        no_fail_fast: args.is_present("no-fail-fast"),
+        no_fail_fast: args.flag("no-fail-fast"),
         compile_opts,
     };
 
-    let err = ops::run_tests(&ws, &ops, &test_args)?;
-    match err {
-        None => Ok(()),
-        Some(err) => {
-            let context = anyhow::format_err!("{}", err.hint(&ws, &ops.compile_opts));
-            let e = match err.code {
-                // Don't show "process didn't exit successfully" for simple errors.
-                Some(i) if cargo_util::is_simple_exit_code(i) => CliError::new(context, i),
-                Some(i) => CliError::new(Error::from(err).context(context), i),
-                None => CliError::new(Error::from(err).context(context), 101),
-            };
-            Err(e)
-        }
-    }
+    ops::run_tests(&ws, &ops, &test_args)
 }

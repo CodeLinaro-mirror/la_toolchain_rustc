@@ -135,11 +135,11 @@ In principle, Rust can do some interesting analyses and optimizations based
 on this fact. For instance, `Result<T, Void>` is represented as just `T`,
 because the `Err` case doesn't actually exist (strictly speaking, this is only
 an optimization that is not guaranteed, so for example transmuting one into the
-other is still UB).
+other is still Undefined Behavior).
 
-The following *could* also compile:
+The following also compiles:
 
-```rust,compile_fail
+```rust
 enum Void {}
 
 let res: Result<u32, Void> = Ok(0);
@@ -148,8 +148,6 @@ let res: Result<u32, Void> = Ok(0);
 let Ok(num) = res;
 ```
 
-But this trick doesn't work yet.
-
 One final subtle detail about empty types is that raw pointers to them are
 actually valid to construct, but dereferencing them is Undefined Behavior
 because that wouldn't make sense.
@@ -157,15 +155,15 @@ because that wouldn't make sense.
 We recommend against modelling C's `void*` type with `*const Void`.
 A lot of people started doing that but quickly ran into trouble because
 Rust doesn't really have any safety guards against trying to instantiate
-empty types with unsafe code, and if you do it, it's Undefined Behaviour.
+empty types with unsafe code, and if you do it, it's Undefined Behavior.
 This was especially problematic because developers had a habit of converting
-raw pointers to references and `&Void` is *also* Undefined Behaviour to
+raw pointers to references and `&Void` is *also* Undefined Behavior to
 construct.
 
 `*const ()` (or equivalent) works reasonably well for `void*`, and can be made
 into a reference without any safety problems. It still doesn't prevent you from
 trying to read or write values, but at least it compiles to a no-op instead
-of UB.
+of Undefined Behavior.
 
 ## Extern Types
 

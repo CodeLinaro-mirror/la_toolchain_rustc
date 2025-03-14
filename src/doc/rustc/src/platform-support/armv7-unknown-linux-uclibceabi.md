@@ -2,7 +2,7 @@
 
 **Tier: 3**
 
-This target supports ARMv7 softfloat CPUs and uses the uclibc-ng standard library. This is a common configuration on many consumer routers (e.g., Netgear R7000, Asus RT-AC68U).
+This target supports Armv7-A softfloat CPUs and uses the uclibc-ng standard library. This is a common configuration on many consumer routers (e.g., Netgear R7000, Asus RT-AC68U).
 
 ## Target maintainers
 
@@ -16,7 +16,7 @@ This target supports host tools and std.
 
 ## Building the target
 
-You will need to download or build a `'C'` cross toolchain that targets ARMv7 softfloat and that uses the uclibc-ng standard library. If your target hardware is something like a router or an embedded device, keep in mind that manufacturer supplied SDKs for this class of CPU could be outdated and potentially unsuitable for bootstrapping rust.
+You will need to download or build a `'C'` cross toolchain that targets Armv7-A softfloat and that uses the uclibc-ng standard library. If your target hardware is something like a router or an embedded device, keep in mind that manufacturer supplied SDKs for this class of CPU could be outdated and potentially unsuitable for bootstrapping rust.
 
 [Here](https://github.com/lancethepants/tomatoware-toolchain) is a sample toolchain that is built using [buildroot](https://buildroot.org/). It uses modern toolchain components, older thus universal kernel headers (2.6.36.4), and is used for a project called [Tomatoware](https://github.com/lancethepants/tomatoware). This toolchain is patched so that its sysroot is located at /mmc (e.g., /mmc/bin, /mmc/lib, /mmc/include). This is useful in scenarios where the root filesystem is read-only but you are able attach external storage loaded with user applications. Tomatoware is an example of this that even allows you to run various compilers and developer tools natively on the target device.
 
@@ -36,8 +36,8 @@ target = ["armv7-unknown-linux-uclibceabi"]
 cc = "/path/to/arm-unknown-linux-uclibcgnueabi-gcc"
 cxx = "/path/to/arm-unknown-linux-uclibcgnueabi-g++"
 ar = "path/to/arm-unknown-linux-uclibcgnueabi-ar"
-ranlib = "path/to/arm-unknown-linux-uclibcgnueabi-"
-linker = "/path/to/arm-unknown-linux-uclibcgnueabi-"
+ranlib = "path/to/arm-unknown-linux-uclibcgnueabi-ranlib"
+linker = "/path/to/arm-unknown-linux-uclibcgnueabi-gcc"
 ```
 
 ## Building Rust programs
@@ -46,7 +46,7 @@ The following assumes you are using the Tomatoware toolchain and environment. Ad
 
 ### Native compilation
 
-Since this target supports host tools, you can natively build rust applications directly on your target device. This can be convenient because it removes the complexities of cross compiling and you can immediately test and deploy your binaries. One downside is that compiling on your ARMv7 CPU will probably be much slower than cross compilation on your x86 machine.
+Since this target supports host tools, you can natively build rust applications directly on your target device. This can be convenient because it removes the complexities of cross compiling and you can immediately test and deploy your binaries. One downside is that compiling on your Armv7-A CPU will probably be much slower than cross compilation on your x86 machine.
 
 To setup native compilation:
 
@@ -66,7 +66,7 @@ After completing these steps you can use rust normally in a native environment.
 
 To cross compile, you'll need to:
 
-* Build the rust cross toochain using  [rust-bootstrap-armv7-unknown-linux-uclibceabi](https://github.com/lancethepants/rust-bootstrap-armv7-unknown-linux-uclibceabi) or your own built toolchain.
+* Build the rust cross toolchain using  [rust-bootstrap-armv7-unknown-linux-uclibceabi](https://github.com/lancethepants/rust-bootstrap-armv7-unknown-linux-uclibceabi) or your own built toolchain.
 * Link your built toolchain with
 
     ```text
@@ -75,27 +75,37 @@ To cross compile, you'll need to:
     ```
 * Build with:
     ```text
-    CC=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-gcc \
-    CXX=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-g++ \
-    AR=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-ar \
+    CC_armv7_unknown_linux_uclibceabi=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-gcc \
+    CXX_armv7_unknown_linux_uclibceabi=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-g++ \
+    AR_armv7_unknown_linux_uclibceabi=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-ar \
+    CFLAGS_armv7_unknown_linux_uclibceabi="-march=armv7-a -mtune=cortex-a9" \
+    CXXFLAGS_armv7_unknown_linux_uclibceabi="-march=armv7-a -mtune=cortex-a9" \
     CARGO_TARGET_ARMV7_UNKNOWN_LINUX_UCLIBCEABI_LINKER=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-gcc \
     CARGO_TARGET_ARMV7_UNKNOWN_LINUX_UCLIBCEABI_RUSTFLAGS='-Clink-arg=-s -Clink-arg=-Wl,--dynamic-linker=/mmc/lib/ld-uClibc.so.1 -Clink-arg=-Wl,-rpath,/mmc/lib' \
-    cargo +stage2 build --target armv7-unknown-linux-uclibceabi --release
+    cargo +stage2 \
+    build \
+    --target armv7-unknown-linux-uclibceabi \
+    --release
     ```
 * Copy the binary to your target device and run.
 
-We specify `CC`, `CXX`, and `AR` because somtimes a project or a subproject requires the use of your `'C'` cross toolchain. Since Tomatoware has a modified sysroot we also pass via RUSTFLAGS the location of the dynamic-linker and rpath.
+We specify `CC`, `CXX`, `AR`, `CFLAGS`, and `CXXFLAGS` environment variables because sometimes a project or a subproject requires the use of your `'C'` cross toolchain. Since Tomatoware has a modified sysroot we also pass via RUSTFLAGS the location of the dynamic-linker and rpath.
 
 ### Test with QEMU
 
 To test a cross-compiled binary on your build system follow the instructions for `Cross Compilation`, install `qemu-arm-static`, and run with the following.
 ```text
-CC=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-gcc \
-CXX=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-g++ \
-AR=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-ar \
+CC_armv7_unknown_linux_uclibceabi=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-gcc \
+CXX_armv7_unknown_linux_uclibceabi=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-g++ \
+AR_armv7_unknown_linux_uclibceabi=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-ar \
+CFLAGS_armv7_unknown_linux_uclibceabi="-march=armv7-a -mtune=cortex-a9" \
+CXXFLAGS_armv7_unknown_linux_uclibceabi="-march=armv7-a -mtune=cortex-a9" \
 CARGO_TARGET_ARMV7_UNKNOWN_LINUX_UCLIBCEABI_LINKER=/opt/tomatoware/arm-soft-mmc/bin/arm-linux-gcc \
 CARGO_TARGET_ARMV7_UNKNOWN_LINUX_UCLIBCEABI_RUNNER="qemu-arm-static -L /opt/tomatoware/arm-soft-mmc/arm-tomatoware-linux-uclibcgnueabi/sysroot/" \
-cargo +stage2 run --target armv7-unknown-linux-uclibceabi --release
+cargo +stage2 \
+run \
+--target armv7-unknown-linux-uclibceabi \
+--release
 ```
 ### Run in a chroot
 

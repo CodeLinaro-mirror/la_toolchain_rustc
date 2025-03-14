@@ -1,5 +1,5 @@
 use ide_assists::utils::extract_trivial_expression;
-use ide_db::helpers::node_ext::expr_as_name_ref;
+use ide_db::syntax_helpers::node_ext::expr_as_name_ref;
 use itertools::Itertools;
 use syntax::{
     ast::{self, AstNode, AstToken, IsString},
@@ -28,7 +28,7 @@ pub struct JoinLinesConfig {
 // |===
 // | Editor  | Action Name
 //
-// | VS Code | **Rust Analyzer: Join lines**
+// | VS Code | **rust-analyzer: Join lines**
 // |===
 //
 // image::https://user-images.githubusercontent.com/48062697/113020661-b6922200-917a-11eb-87c4-b75acc028f11.gif[]
@@ -115,7 +115,7 @@ fn remove_newline(
 
         let range = TextRange::at(offset, ((n_spaces_after_line_break + 1) as u32).into());
         let replace_with = if no_space { "" } else { " " };
-        edit.replace(range, replace_with.to_string());
+        edit.replace(range, replace_with.to_owned());
         return;
     }
 
@@ -140,7 +140,7 @@ fn remove_newline(
                 };
                 edit.replace(
                     TextRange::new(prev.text_range().start(), token.text_range().end()),
-                    space.to_string(),
+                    space.to_owned(),
                 );
                 return;
             }
@@ -154,17 +154,15 @@ fn remove_newline(
                 Some(_) => cov_mark::hit!(join_two_ifs_with_existing_else),
                 None => {
                     cov_mark::hit!(join_two_ifs);
-                    edit.replace(token.text_range(), " else ".to_string());
+                    edit.replace(token.text_range(), " else ".to_owned());
                     return;
                 }
             }
         }
     }
 
-    if config.join_assignments {
-        if join_assignments(edit, &prev, &next).is_some() {
-            return;
-        }
+    if config.join_assignments && join_assignments(edit, &prev, &next).is_some() {
+        return;
     }
 
     if config.unwrap_trivial_blocks {
@@ -205,11 +203,11 @@ fn remove_newline(
     }
 
     // Remove newline but add a computed amount of whitespace characters
-    edit.replace(token.text_range(), compute_ws(prev.kind(), next.kind()).to_string());
+    edit.replace(token.text_range(), compute_ws(prev.kind(), next.kind()).to_owned());
 }
 
 fn join_single_expr_block(edit: &mut TextEditBuilder, token: &SyntaxToken) -> Option<()> {
-    let block_expr = ast::BlockExpr::cast(token.ancestors().nth(1)?)?;
+    let block_expr = ast::BlockExpr::cast(token.parent_ancestors().nth(1)?)?;
     if !block_expr.is_standalone() {
         return None;
     }
@@ -305,7 +303,6 @@ fn compute_ws(left: SyntaxKind, right: SyntaxKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use syntax::SourceFile;
     use test_utils::{add_cursor, assert_eq_text, extract_offset, extract_range};
 
     use super::*;
@@ -319,7 +316,7 @@ mod tests {
         };
 
         let (before_cursor_pos, before) = extract_offset(ra_fixture_before);
-        let file = SourceFile::parse(&before).ok().unwrap();
+        let file = SourceFile::parse(&before, span::Edition::CURRENT).ok().unwrap();
 
         let range = TextRange::empty(before_cursor_pos);
         let result = join_lines(&config, &file, range);
@@ -345,7 +342,7 @@ mod tests {
         };
 
         let (sel, before) = extract_range(ra_fixture_before);
-        let parse = SourceFile::parse(&before);
+        let parse = SourceFile::parse(&before, span::Edition::CURRENT);
         let result = join_lines(&config, &parse.tree(), sel);
         let actual = {
             let mut actual = before;

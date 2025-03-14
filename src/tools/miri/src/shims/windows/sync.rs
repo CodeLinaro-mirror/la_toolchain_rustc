@@ -1,121 +1,220 @@
+use std::time::Duration;
+
+use rustc_target::abi::Size;
+
+use crate::concurrency::init_once::InitOnceStatus;
 use crate::*;
 
-// Locks are pointer-sized pieces of data, initialized to 0.
-// We use the first 4 bytes to store the RwLockId.
+impl<'tcx> EvalContextExtPriv<'tcx> for crate::MiriInterpCx<'tcx> {}
+trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
+    // Windows sync primitives are pointer sized.
+    // We only use the first 4 bytes for the id.
 
-fn srwlock_get_or_create_id<'mir, 'tcx: 'mir>(
-    ecx: &mut MiriEvalContext<'mir, 'tcx>,
-    lock_op: &OpTy<'tcx, Tag>,
-) -> InterpResult<'tcx, RwLockId> {
-    let id = ecx.read_scalar_at_offset(lock_op, 0, ecx.machine.layouts.u32)?.to_u32()?;
-    if id == 0 {
-        // 0 is a default value and also not a valid rwlock id. Need to allocate
-        // a new rwlock.
-        let id = ecx.rwlock_create();
-        ecx.write_scalar_at_offset(lock_op, 0, id.to_u32_scalar(), ecx.machine.layouts.u32)?;
-        Ok(id)
-    } else {
-        Ok(RwLockId::from_u32(id))
+    fn init_once_get_id(&mut self, init_once_ptr: &OpTy<'tcx>) -> InterpResult<'tcx, InitOnceId> {
+        let this = self.eval_context_mut();
+        let init_once = this.deref_pointer(init_once_ptr)?;
+        this.init_once_get_or_create_id(&init_once, 0)
+    }
+
+    /// Returns `true` if we were succssful, `false` if we would block.
+    fn init_once_try_begin(
+        &mut self,
+        id: InitOnceId,
+        pending_place: &MPlaceTy<'tcx>,
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx, bool> {
+        let this = self.eval_context_mut();
+        interp_ok(match this.init_once_status(id) {
+            InitOnceStatus::Uninitialized => {
+                this.init_once_begin(id);
+                this.write_scalar(this.eval_windows("c", "TRUE"), pending_place)?;
+                this.write_scalar(this.eval_windows("c", "TRUE"), dest)?;
+                true
+            }
+            InitOnceStatus::Complete => {
+                this.init_once_observe_completed(id);
+                this.write_scalar(this.eval_windows("c", "FALSE"), pending_place)?;
+                this.write_scalar(this.eval_windows("c", "TRUE"), dest)?;
+                true
+            }
+            InitOnceStatus::Begun => false,
+        })
     }
 }
 
-impl<'mir, 'tcx> EvalContextExt<'mir, 'tcx> for crate::MiriEvalContext<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx> {
-    #[allow(non_snake_case)]
-    fn AcquireSRWLockExclusive(&mut self, lock_op: &OpTy<'tcx, Tag>) -> InterpResult<'tcx> {
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+#[allow(non_snake_case)]
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
+    fn InitOnceBeginInitialize(
+        &mut self,
+        init_once_op: &OpTy<'tcx>,
+        flags_op: &OpTy<'tcx>,
+        pending_op: &OpTy<'tcx>,
+        context_op: &OpTy<'tcx>,
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let id = srwlock_get_or_create_id(this, lock_op)?;
-        let active_thread = this.get_active_thread();
 
-        if this.rwlock_is_locked(id) {
-            // Note: this will deadlock if the lock is already locked by this
-            // thread in any way.
-            //
-            // FIXME: Detect and report the deadlock proactively. (We currently
-            // report the deadlock only when no thread can continue execution,
-            // but we could detect that this lock is already locked and report
-            // an error.)
-            this.rwlock_enqueue_and_block_writer(id, active_thread);
-        } else {
-            this.rwlock_writer_lock(id, active_thread);
+        let id = this.init_once_get_id(init_once_op)?;
+        let flags = this.read_scalar(flags_op)?.to_u32()?;
+        let pending_place = this.deref_pointer(pending_op)?;
+        let context = this.read_pointer(context_op)?;
+
+        if flags != 0 {
+            throw_unsup_format!("unsupported `dwFlags` {flags} in `InitOnceBeginInitialize`");
         }
 
-        Ok(())
-    }
-
-    #[allow(non_snake_case)]
-    fn TryAcquireSRWLockExclusive(&mut self, lock_op: &OpTy<'tcx, Tag>) -> InterpResult<'tcx, u8> {
-        let this = self.eval_context_mut();
-        let id = srwlock_get_or_create_id(this, lock_op)?;
-        let active_thread = this.get_active_thread();
-
-        if this.rwlock_is_locked(id) {
-            // Lock is already held.
-            Ok(0)
-        } else {
-            this.rwlock_writer_lock(id, active_thread);
-            Ok(1)
+        if !this.ptr_is_null(context)? {
+            throw_unsup_format!("non-null `lpContext` in `InitOnceBeginInitialize`");
         }
+
+        if this.init_once_try_begin(id, &pending_place, dest)? {
+            // Done!
+            return interp_ok(());
+        }
+
+        // We have to block, and then try again when we are woken up.
+        let dest = dest.clone();
+        this.init_once_enqueue_and_block(
+            id,
+            callback!(
+                @capture<'tcx> {
+                    id: InitOnceId,
+                    pending_place: MPlaceTy<'tcx>,
+                    dest: MPlaceTy<'tcx>,
+                }
+                @unblock = |this| {
+                    let ret = this.init_once_try_begin(id, &pending_place, &dest)?;
+                    assert!(ret, "we were woken up but init_once_try_begin still failed");
+                    interp_ok(())
+                }
+            ),
+        );
+        interp_ok(())
     }
 
-    #[allow(non_snake_case)]
-    fn ReleaseSRWLockExclusive(&mut self, lock_op: &OpTy<'tcx, Tag>) -> InterpResult<'tcx> {
+    fn InitOnceComplete(
+        &mut self,
+        init_once_op: &OpTy<'tcx>,
+        flags_op: &OpTy<'tcx>,
+        context_op: &OpTy<'tcx>,
+    ) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
-        let id = srwlock_get_or_create_id(this, lock_op)?;
-        let active_thread = this.get_active_thread();
 
-        if !this.rwlock_writer_unlock(id, active_thread) {
+        let id = this.init_once_get_id(init_once_op)?;
+        let flags = this.read_scalar(flags_op)?.to_u32()?;
+        let context = this.read_pointer(context_op)?;
+
+        let success = if flags == 0 {
+            true
+        } else if flags == this.eval_windows_u32("c", "INIT_ONCE_INIT_FAILED") {
+            false
+        } else {
+            throw_unsup_format!("unsupported `dwFlags` {flags} in `InitOnceBeginInitialize`");
+        };
+
+        if !this.ptr_is_null(context)? {
+            throw_unsup_format!("non-null `lpContext` in `InitOnceBeginInitialize`");
+        }
+
+        if this.init_once_status(id) != InitOnceStatus::Begun {
             // The docs do not say anything about this case, but it seems better to not allow it.
             throw_ub_format!(
-                "calling ReleaseSRWLockExclusive on an SRWLock that is not exclusively locked by the current thread"
+                "calling InitOnceComplete on a one time initialization that has not begun or is already completed"
             );
         }
 
-        Ok(())
-    }
-
-    #[allow(non_snake_case)]
-    fn AcquireSRWLockShared(&mut self, lock_op: &OpTy<'tcx, Tag>) -> InterpResult<'tcx> {
-        let this = self.eval_context_mut();
-        let id = srwlock_get_or_create_id(this, lock_op)?;
-        let active_thread = this.get_active_thread();
-
-        if this.rwlock_is_write_locked(id) {
-            this.rwlock_enqueue_and_block_reader(id, active_thread);
+        if success {
+            this.init_once_complete(id)?;
         } else {
-            this.rwlock_reader_lock(id, active_thread);
+            this.init_once_fail(id)?;
         }
 
-        Ok(())
+        interp_ok(this.eval_windows("c", "TRUE"))
     }
 
-    #[allow(non_snake_case)]
-    fn TryAcquireSRWLockShared(&mut self, lock_op: &OpTy<'tcx, Tag>) -> InterpResult<'tcx, u8> {
+    fn WaitOnAddress(
+        &mut self,
+        ptr_op: &OpTy<'tcx>,
+        compare_op: &OpTy<'tcx>,
+        size_op: &OpTy<'tcx>,
+        timeout_op: &OpTy<'tcx>,
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let id = srwlock_get_or_create_id(this, lock_op)?;
-        let active_thread = this.get_active_thread();
 
-        if this.rwlock_is_write_locked(id) {
-            Ok(0)
+        let ptr = this.read_pointer(ptr_op)?;
+        let compare = this.read_pointer(compare_op)?;
+        let size = this.read_target_usize(size_op)?;
+        let timeout_ms = this.read_scalar(timeout_op)?.to_u32()?;
+
+        let addr = ptr.addr().bytes();
+
+        if size > 8 || !size.is_power_of_two() {
+            let invalid_param = this.eval_windows("c", "ERROR_INVALID_PARAMETER");
+            this.set_last_error(invalid_param)?;
+            this.write_scalar(Scalar::from_i32(0), dest)?;
+            return interp_ok(());
+        };
+        let size = Size::from_bytes(size);
+
+        let timeout = if timeout_ms == this.eval_windows_u32("c", "INFINITE") {
+            None
         } else {
-            this.rwlock_reader_lock(id, active_thread);
-            Ok(1)
-        }
-    }
+            let duration = Duration::from_millis(timeout_ms.into());
+            Some((TimeoutClock::Monotonic, TimeoutAnchor::Relative, duration))
+        };
 
-    #[allow(non_snake_case)]
-    fn ReleaseSRWLockShared(&mut self, lock_op: &OpTy<'tcx, Tag>) -> InterpResult<'tcx> {
-        let this = self.eval_context_mut();
-        let id = srwlock_get_or_create_id(this, lock_op)?;
-        let active_thread = this.get_active_thread();
+        // See the Linux futex implementation for why this fence exists.
+        this.atomic_fence(AtomicFenceOrd::SeqCst)?;
 
-        if !this.rwlock_reader_unlock(id, active_thread) {
-            // The docs do not say anything about this case, but it seems better to not allow it.
-            throw_ub_format!(
-                "calling ReleaseSRWLockShared on an SRWLock that is not locked by the current thread"
+        let layout = this.machine.layouts.uint(size).unwrap();
+        let futex_val =
+            this.read_scalar_atomic(&this.ptr_to_mplace(ptr, layout), AtomicReadOrd::Relaxed)?;
+        let compare_val = this.read_scalar(&this.ptr_to_mplace(compare, layout))?;
+
+        if futex_val == compare_val {
+            // If the values are the same, we have to block.
+            this.futex_wait(
+                addr,
+                u32::MAX, // bitset
+                timeout,
+                Scalar::from_i32(1), // retval_succ
+                Scalar::from_i32(0), // retval_timeout
+                dest.clone(),
+                this.eval_windows("c", "ERROR_TIMEOUT"),
             );
         }
 
-        Ok(())
+        this.write_scalar(Scalar::from_i32(1), dest)?;
+
+        interp_ok(())
+    }
+
+    fn WakeByAddressSingle(&mut self, ptr_op: &OpTy<'tcx>) -> InterpResult<'tcx> {
+        let this = self.eval_context_mut();
+
+        let ptr = this.read_pointer(ptr_op)?;
+
+        // See the Linux futex implementation for why this fence exists.
+        this.atomic_fence(AtomicFenceOrd::SeqCst)?;
+
+        let addr = ptr.addr().bytes();
+        this.futex_wake(addr, u32::MAX)?;
+
+        interp_ok(())
+    }
+    fn WakeByAddressAll(&mut self, ptr_op: &OpTy<'tcx>) -> InterpResult<'tcx> {
+        let this = self.eval_context_mut();
+
+        let ptr = this.read_pointer(ptr_op)?;
+
+        // See the Linux futex implementation for why this fence exists.
+        this.atomic_fence(AtomicFenceOrd::SeqCst)?;
+
+        let addr = ptr.addr().bytes();
+        while this.futex_wake(addr, u32::MAX)? {}
+
+        interp_ok(())
     }
 }

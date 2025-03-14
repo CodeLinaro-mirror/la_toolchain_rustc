@@ -37,7 +37,7 @@ A description of the command.
 <dd class="option-desc">This has multiple flags.</dd>
 
 
-<dt class="option-term" id="option-options-named-arg..."><a class="option-anchor" href="#option-options-named-arg..."></a><em>named-arg...</em></dt>
+<dt class="option-term" id="option-options-named-arg…"><a class="option-anchor" href="#option-options-named-arg…"></a><em>named-arg…</em></dt>
 <dd class="option-desc">A named argument.</dd>
 
 
@@ -56,6 +56,10 @@ A description of the command.
 
 <dt class="option-term" id="option-options---foo[=bar]"><a class="option-anchor" href="#option-options---foo[=bar]"></a><code>--foo</code>[<code>=</code><em>bar</em>]</dt>
 <dd class="option-desc">Alternate syntax for optional value (with required = for disambiguation).</dd>
+
+
+<dt class="option-term" id="option-options---split-block"><a class="option-anchor" href="#option-options---split-block"></a><code>--split-block</code></dt>
+<dd class="option-desc">An option where the description has a <code>block statement that is split across multiple lines</code></dd>
 
 
 </dl>

@@ -37,11 +37,13 @@ pub struct CoolStruct {
     pub y: cty::c_int,
 }
 
-pub extern "C" fn cool_function(
-    i: cty::c_int,
-    c: cty::c_char,
-    cs: *mut CoolStruct
-);
+extern "C" {
+    pub fn cool_function(
+        i: cty::c_int,
+        c: cty::c_char,
+        cs: *mut CoolStruct
+    );
+}
 ```
 
 Let's take a look at this definition one piece at a time, to explain each of the parts.
@@ -61,7 +63,7 @@ pub y: cty::c_int,
 Due to the flexibility of how C or C++ defines an `int` or `char`, it is recommended to use primitive data types defined in `cty`, which will map types from C to types in Rust.
 
 ```rust,ignore
-pub extern "C" fn cool_function( ... );
+extern "C" { pub fn cool_function( ... ); }
 ```
 
 This statement defines the signature of a function that uses the C ABI, called `cool_function`. By defining the signature without defining the body of the function, the definition of this function will need to be provided elsewhere, or linked into the final library or binary from a static library.
@@ -85,7 +87,7 @@ Rather than manually generating these interfaces, which may be tedious and error
 3. Feed this `bindings.h` file, along with any compilation flags used to compile
   your code into `bindgen`. Tip: use `Builder.ctypes_prefix("cty")` /
   `--ctypes-prefix=cty` and `Builder.use_core()` / `--use-core` to make the generated code `#![no_std]` compatible.
-4. `bindgen` will produce the generated Rust code to the output of the terminal window. This file may be piped to a file in your project, such as `bindings.rs`. You may use this file in your Rust project to interact with C/C++ code compiled and linked as an external library. Tip: don't forget to use the [`cty`](https://crates.io/crates/cty) crate if your types in the generated bindings are prefixed with `cty`.
+4. `bindgen` will produce the generated Rust code to the output of the terminal window. This output may be piped to a file in your project, such as `bindings.rs`. You may use this file in your Rust project to interact with C/C++ code compiled and linked as an external library. Tip: don't forget to use the [`cty`](https://crates.io/crates/cty) crate if your types in the generated bindings are prefixed with `cty`.
 
 [bindgen]: https://github.com/rust-lang/rust-bindgen
 [bindgen user's manual]: https://rust-lang.github.io/rust-bindgen/
@@ -123,11 +125,11 @@ For projects with limited dependencies or complexity, or for projects where it i
 In the simplest case of compiling a single C file as a dependency to a static library, an example `build.rs` script using the [`cc` crate] would look like this:
 
 ```rust,ignore
-extern crate cc;
-
 fn main() {
     cc::Build::new()
-        .file("foo.c")
-        .compile("libfoo.a");
+        .file("src/foo.c")
+        .compile("foo");
 }
 ```
+
+The `build.rs` is placed at the root of the package. Then `cargo build` will compile and execute it before the build of the package. A static archive named `libfoo.a` is generated and placed in the `target` directory.

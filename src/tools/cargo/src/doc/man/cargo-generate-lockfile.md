@@ -2,7 +2,7 @@
 
 ## NAME
 
-cargo-generate-lockfile - Generate the lockfile for a package
+cargo-generate-lockfile --- Generate the lockfile for a package
 
 ## SYNOPSIS
 
@@ -30,7 +30,11 @@ lockfile and has more options for controlling update behavior.
 {{#options}}
 {{> options-manifest-path }}
 
+{{> options-ignore-rust-version }}
+
 {{> options-locked }}
+
+{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-options-common }}

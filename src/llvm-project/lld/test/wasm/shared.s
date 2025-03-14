@@ -1,5 +1,5 @@
 # RUN: llvm-mc -filetype=obj -triple=wasm32-unknown-unknown -o %t.o %s
-# RUN: wasm-ld --experimental-pic -shared -o %t.wasm %t.o
+# RUN: wasm-ld --experimental-pic --unresolved-symbols=import-dynamic -shared -o %t.wasm %t.o
 # RUN: obj2yaml %t.wasm | FileCheck %s
 # RUN: llvm-objdump --disassemble-symbols=__wasm_call_ctors,__wasm_apply_data_relocs --no-show-raw-insn --no-leading-addr %t.wasm | FileCheck %s --check-prefixes DIS
 
@@ -7,8 +7,8 @@
 
 # Linker-synthesized globals
 .globaltype __stack_pointer, i32
-.globaltype	__table_base, i32, immutable
-.globaltype	__memory_base, i32, immutable
+.globaltype __table_base, i32, immutable
+.globaltype __memory_base, i32, immutable
 
 .section .data.data,"",@
 data:
@@ -52,8 +52,8 @@ extern_struct_internal_ptr:
 .section .text,"",@
 foo:
   # %ptr = alloca i32
-  # %0 = load i32, i32* @data, align 4
-  # %1 = load i32 ()*, i32 ()** @indirect_func, align 4
+  # %0 = load i32, ptr @data, align 4
+  # %1 = load ptr, ptr @indirect_func, align 4
   # call i32 %1()
   # ret i32 %0
   .functype foo () -> (i32)
@@ -209,37 +209,36 @@ get_local_func_address:
 
 # DIS:      <__wasm_call_ctors>:
 # DIS-EMPTY:
-# DIS-NEXT:                 call    1
 # DIS-NEXT:                 end
 
 # DIS:      <__wasm_apply_data_relocs>:
 # DIS-EMPTY:
-# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.const       4
+# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.add
 # DIS-NEXT:                 global.get      4
 # DIS-NEXT:                 i32.store       0
-# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.const       8
+# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.add
 # DIS-NEXT:                 global.get      2
 # DIS-NEXT:                 i32.const       1
 # DIS-NEXT:                 i32.add
 # DIS-NEXT:                 i32.store       0
-# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.const       12
+# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.add
 # DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.const       0
 # DIS-NEXT:                 i32.add
 # DIS-NEXT:                 i32.store       0
-# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.const       16
+# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.add
 # DIS-NEXT:                 global.get      5
 # DIS-NEXT:                 i32.store       0
-# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.const       20
+# DIS-NEXT:                 global.get      1
 # DIS-NEXT:                 i32.add
 # DIS-NEXT:                 global.get      6
 # DIS-NEXT:                 i32.const       4

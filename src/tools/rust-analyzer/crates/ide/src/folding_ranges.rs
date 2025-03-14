@@ -1,6 +1,4 @@
-use ide_db::helpers::node_ext::vis_eq;
-use rustc_hash::FxHashSet;
-
+use ide_db::{syntax_helpers::node_ext::vis_eq, FxHashSet};
 use syntax::{
     ast::{self, AstNode, AstToken},
     match_ast, Direction, NodeOrToken, SourceFile,
@@ -26,6 +24,7 @@ pub enum FoldKind {
     Array,
     WhereClause,
     ReturnType,
+    MatchArm,
 }
 
 #[derive(Debug)]
@@ -117,6 +116,11 @@ pub(crate) fn folding_ranges(file: &SourceFile) -> Vec<Fold> {
                         ast::WhereClause(where_clause) => {
                             if let Some(range) = fold_range_for_where_clause(where_clause) {
                                 res.push(Fold { range, kind: FoldKind::WhereClause })
+                            }
+                        },
+                        ast::MatchArm(match_arm) => {
+                            if let Some(range) = fold_range_for_multiline_match_arm(match_arm) {
+                                res.push(Fold {range, kind: FoldKind::MatchArm})
                             }
                         },
                         _ => (),
@@ -266,6 +270,16 @@ fn fold_range_for_where_clause(where_clause: ast::WhereClause) -> Option<TextRan
     None
 }
 
+fn fold_range_for_multiline_match_arm(match_arm: ast::MatchArm) -> Option<TextRange> {
+    if fold_kind(match_arm.expr()?.syntax().kind()).is_some() {
+        None
+    } else if match_arm.expr()?.syntax().text().contains_char('\n') {
+        Some(match_arm.expr()?.syntax().text_range())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use test_utils::extract_tags;
@@ -275,7 +289,7 @@ mod tests {
     fn check(ra_fixture: &str) {
         let (ranges, text) = extract_tags(ra_fixture, "fold");
 
-        let parse = SourceFile::parse(&text);
+        let parse = SourceFile::parse(&text, span::Edition::CURRENT);
         let mut folds = folding_ranges(&parse.tree());
         folds.sort_by_key(|fold| (fold.range.start(), fold.range.end()));
 
@@ -301,6 +315,7 @@ mod tests {
                 FoldKind::Array => "array",
                 FoldKind::WhereClause => "whereclause",
                 FoldKind::ReturnType => "returntype",
+                FoldKind::MatchArm => "matcharm",
             };
             assert_eq!(kind, &attr.unwrap());
         }
@@ -456,6 +471,36 @@ fn main() <fold block>{
 }</fold>
 "#,
         );
+    }
+
+    #[test]
+    fn test_fold_multiline_non_block_match_arm() {
+        check(
+            r#"
+            fn main() <fold block>{
+                match foo <fold block>{
+                    block => <fold block>{
+                    }</fold>,
+                    matcharm => <fold matcharm>some.
+                        call().
+                        chain()</fold>,
+                    matcharm2
+                        => 0,
+                    match_expr => <fold matcharm>match foo2 <fold block>{
+                        bar => (),
+                    }</fold></fold>,
+                    array_list => <fold array>[
+                        1,
+                        2,
+                        3,
+                    ]</fold>,
+                    structS => <fold matcharm>StructS <fold block>{
+                        a: 31,
+                    }</fold></fold>,
+                }</fold>
+            }</fold>
+            "#,
+        )
     }
 
     #[test]

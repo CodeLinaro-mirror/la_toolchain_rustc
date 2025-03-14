@@ -1,14 +1,16 @@
 # Destructors
 
+r[destructors.intro]
 When an [initialized]&#32;[variable] or [temporary] goes out of
 [scope](#drop-scopes), its *destructor* is run, or it is *dropped*. [Assignment]
 also runs the destructor of its left-hand operand, if it's initialized. If a
 variable has been partially initialized, only its initialized fields are
 dropped.
 
+r[destructors.operation]
 The destructor of a type `T` consists of:
 
-1. If `T: Drop`, calling [`<T as std::ops::Drop>::drop`]
+1. If `T: Drop`, calling [`<T as std::ops::Drop>::drop`](std::ops::Drop::drop)
 2. Recursively running the destructor of all of its fields.
     * The fields of a [struct] are dropped in declaration order.
     * The fields of the active [enum variant] are dropped in declaration order.
@@ -20,6 +22,7 @@ The destructor of a type `T` consists of:
     * [Trait objects] run the destructor of the underlying type.
     * Other types don't result in any further drops.
 
+r[destructors.drop_in_place]
 If a destructor must be run manually, such as when implementing your own smart
 pointer, [`std::ptr::drop_in_place`] can be used.
 
@@ -57,47 +60,83 @@ core::mem::forget(partial_move.1);
 
 ## Drop scopes
 
+r[destructors.scope]
+
+r[destructors.scope.intro]
 Each variable or temporary is associated to a *drop scope*. When control flow
 leaves a drop scope all variables associated to that scope are dropped in
 reverse order of declaration (for variables) or creation (for temporaries).
 
+r[destructors.scope.desugaring]
 Drop scopes are determined after replacing [`for`], [`if let`], and
 [`while let`] expressions with the equivalent expressions using [`match`].
+
+r[destructors.scope.operators]
 Overloaded operators are not distinguished from built-in operators and [binding
 modes] are not considered.
 
+r[destructors.scope.list]
 Given a function, or closure, there are drop scopes for:
 
+r[destructors.scope.function]
 * The entire function
+
+r[destructors.scope.statement]
 * Each [statement]
+
+r[destructors.scope.expression]
 * Each [expression]
+
+r[destructors.scope.block]
 * Each block, including the function body
     * In the case of a [block expression], the scope for the block and the
       expression are the same scope.
+
+r[destructors.scope.match-arm]
 * Each arm of a `match` expression
 
+r[destructors.scope.nesting]
 Drop scopes are nested within one another as follows. When multiple scopes are
 left at once, such as when returning from a function, variables are dropped
 from the inside outwards.
 
+r[destructors.scope.nesting.function]
 * The entire function scope is the outer most scope.
+
+r[destructors.scope.nesting.function-body]
 * The function body block is contained within the scope of the entire function.
+
+r[destructors.scope.nesting.expr-statement]
 * The parent of the expression in an expression statement is the scope of the
   statement.
+
+r[destructors.scope.nesting.let-initializer]
 * The parent of the initializer of a [`let` statement] is the `let` statement's
   scope.
+
+r[destructors.scope.nesting.statement]
 * The parent of a statement scope is the scope of the block that contains the
   statement.
+
+r[destructors.scope.nesting.match-guard]
 * The parent of the expression for a `match` guard is the scope of the arm that
   the guard is for.
+
+r[destructors.scope.nesting.match-arm]
 * The parent of the expression after the `=>` in a `match` expression is the
   scope of the arm that it's in.
+
+r[destructors.scope.nesting.match]
 * The parent of the arm scope is the scope of the `match` expression that it
   belongs to.
+
+r[destructors.scope.nesting.other]
 * The parent of all other scopes is the scope of the immediately enclosing
   expression.
 
 ### Scopes of function parameters
+
+r[destructors.scope.params]
 
 All function parameters are in the scope of the entire function body, so are
 dropped last when evaluating the function. Each actual function parameter is
@@ -125,6 +164,9 @@ patterns_in_parameters(
 
 ### Scopes of local variables
 
+r[destructors.scope.bindings]
+
+r[destructors.scope.bindings.intro]
 Local variables declared in a `let` statement are associated to the scope of
 the block that contains the `let` statement. Local variables declared in a
 `match` expression are associated to the arm scope of the `match` arm that they
@@ -144,32 +186,37 @@ let declared_first = PrintOnDrop("Dropped last in outer scope");
 let declared_last = PrintOnDrop("Dropped first in outer scope");
 ```
 
+r[destructors.scope.bindings.match-pattern-order]
 If multiple patterns are used in the same arm for a `match` expression, then an
 unspecified pattern will be used to determine the drop order.
 
 ### Temporary scopes
 
+r[destructors.scope.temporary]
+
+r[destructors.scope.temporary.intro]
 The *temporary scope* of an expression is the scope that is used for the
 temporary variable that holds the result of that expression when used in a
 [place context], unless it is [promoted].
 
+r[destructors.scope.temporary.enclosing]
 Apart from lifetime extension, the temporary scope of an expression is the
 smallest scope that contains the expression and is one of the following:
 
-* The entire function body.
+* The entire function.
 * A statement.
-* The body of a [`if`], [`while`] or [`loop`] expression.
+* The body of an [`if`], [`while`] or [`loop`] expression.
 * The `else` block of an `if` expression.
 * The condition expression of an `if` or `while` expression, or a `match`
   guard.
-* The expression for a match arm.
+* The body expression for a match arm.
 * The second operand of a [lazy boolean expression].
 
 > **Notes**:
 >
 > Temporaries that are created in the final expression of a function
-> body are dropped *after* any named variables bound in the function body, as
-> there is no smaller enclosing temporary scope.
+> body are dropped *after* any named variables bound in the function body.
+> Their drop scope is the entire function, as there is no smaller enclosing temporary scope.
 >
 > The [scrutinee] of a `match` expression is not a temporary scope, so
 > temporaries in the scrutinee can be dropped after the `match` expression. For
@@ -215,6 +262,8 @@ match PrintOnDrop("Matched value in final expression") {
 
 ### Operands
 
+r[destructors.scope.operands]
+
 Temporaries are also created to hold the result of operands to an expression
 while the other operands are evaluated. The temporaries are associated to the
 scope of the expression with that operand. Since the temporaries are moved from
@@ -245,6 +294,8 @@ loop {
 
 ### Constant promotion
 
+r[destructors.scope.const-promotion]
+
 Promotion of a value expression to a `'static` slot occurs when the expression
 could be written in a constant and borrowed, and that borrow could be dereferenced
 where
@@ -256,9 +307,12 @@ always has the type `&'static Option<_>`, as it contains nothing disallowed).
 
 ### Temporary lifetime extension
 
+r[destructors.scope.lifetime-extension]
+
 > **Note**: The exact rules for temporary lifetime extension are subject to
 > change. This is describing the current behavior only.
 
+r[destructors.scope.lifetime-extension.let]
 The temporary scopes for expressions in `let` statements are sometimes
 *extended* to the scope of the block containing the `let` statement. This is
 done when the usual temporary scope would be too small, based on certain
@@ -271,27 +325,35 @@ let x = &mut 0;
 println!("{}", x);
 ```
 
-If a borrow, dereference, field, or tuple indexing expression has an extended
-temporary scope then so does its operand. If an indexing expression has an
+r[destructors.scope.lifetime-extension.sub-expressions]
+If a [borrow][borrow expression], [dereference][dereference expression],
+[field][field expression], or [tuple indexing expression] has an extended
+temporary scope then so does its operand. If an [indexing expression] has an
 extended temporary scope then the indexed expression also has an extended
 temporary scope.
 
 #### Extending based on patterns
 
+r[destructors.scope.lifetime-extension.patterns]
+
+r[destructors.scope.lifetime-extension.patterns.extending]
 An *extending pattern* is either
 
 * An [identifier pattern] that binds by reference or mutable reference.
 * A [struct][struct pattern], [tuple][tuple pattern], [tuple struct][tuple
   struct pattern], or [slice][slice pattern] pattern where at least one of the
-  direct subpatterns is a extending pattern.
+  direct subpatterns is an extending pattern.
 
 So `ref x`, `V(ref x)` and `[ref x, y]` are all extending patterns, but `x`,
 `&ref x` and `&(ref x,)` are not.
 
+r[destructors.scope.lifetime-extension.patterns.let]
 If the pattern in a `let` statement is an extending pattern then the temporary
 scope of the initializer expression is extended.
 
 #### Extending based on expressions
+
+r[destructors.scope.lifetime-extension.exprs]
 
 For a let statement with an initializer, an *extending expression* is an
 expression which is one of the following:
@@ -345,9 +407,14 @@ let x = (&temp()).use_temp();  // ERROR
 
 ## Not running destructors
 
-Not running destructors in Rust is safe even if it has a type that isn't
-`'static`. [`std::mem::ManuallyDrop`] provides a wrapper to prevent a
+r[destructors.forget]
+
+[`std::mem::forget`] can be used to prevent the destructor of a variable from being run,
+and [`std::mem::ManuallyDrop`] provides a wrapper to prevent a
 variable or field from being dropped automatically.
+
+> Note: Preventing a destructor from being run via [`std::mem::forget`] or other means is safe even if it has a type that isn't `'static`.
+> Besides the places where destructors are guaranteed to run as defined by this document, types may *not* safely rely on a destructor being run for soundness.
 
 [Assignment]: expressions/operator-expr.md#assignment-expressions
 [binding modes]: patterns.md#binding-modes
@@ -381,8 +448,12 @@ variable or field from being dropped automatically.
 [block expression]: expressions/block-expr.md
 [borrow expression]: expressions/operator-expr.md#borrow-operators
 [cast expression]: expressions/operator-expr.md#type-cast-expressions
+[dereference expression]: expressions/operator-expr.md#the-dereference-operator
+[field expression]: expressions/field-expr.md
+[indexing expression]: expressions/array-expr.md#array-and-slice-indexing-expressions
 [struct expression]: expressions/struct-expr.md
 [tuple expression]: expressions/tuple-expr.md#tuple-expressions
+[tuple indexing expression]: expressions/tuple-expr.md#tuple-indexing-expressions
 
 [`for`]: expressions/loop-expr.md#iterator-loops
 [`if let`]: expressions/if-expr.md#if-let-expressions
@@ -392,7 +463,3 @@ variable or field from being dropped automatically.
 [`match`]: expressions/match-expr.md
 [`while let`]: expressions/loop-expr.md#predicate-pattern-loops
 [`while`]: expressions/loop-expr.md#predicate-loops
-
-[`<T as std::ops::Drop>::drop`]: ../std/ops/trait.Drop.html#tymethod.drop
-[`std::ptr::drop_in_place`]: ../std/ptr/fn.drop_in_place.html
-[`std::mem::ManuallyDrop`]: ../std/mem/struct.ManuallyDrop.html

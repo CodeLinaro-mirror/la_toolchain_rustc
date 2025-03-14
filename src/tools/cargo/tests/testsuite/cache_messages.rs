@@ -1,8 +1,11 @@
 //! Tests for caching compiler diagnostics.
 
-use super::messages::raw_rustc_output;
+use cargo_test_support::prelude::*;
+use cargo_test_support::str;
 use cargo_test_support::tools;
 use cargo_test_support::{basic_manifest, is_coarse_mtime, project, registry::Package, sleep_ms};
+
+use super::messages::raw_rustc_output;
 
 fn as_str(bytes: &[u8]) -> &str {
     std::str::from_utf8(bytes).expect("valid utf-8")
@@ -158,7 +161,16 @@ fn clears_cache_after_fix() {
     // Make sure the cache is invalidated when there is no output.
     let p = project().file("src/lib.rs", "fn asdf() {}").build();
     // Fill the cache.
-    p.cargo("check").with_stderr_contains("[..]asdf[..]").run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[WARNING] function `asdf` is never used
+...
+[WARNING] `foo` (lib) generated 1 warning
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
     let cpath = p
         .glob("target/debug/.fingerprint/foo-*/output-*")
         .next()
@@ -173,13 +185,12 @@ fn clears_cache_after_fix() {
     p.change_file("src/lib.rs", "");
 
     p.cargo("check")
-        .with_stdout("")
-        .with_stderr(
-            "\
-[CHECKING] foo [..]
-[FINISHED] [..]
-",
-        )
+        .with_stdout_data("")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     assert_eq!(
         p.glob("target/debug/.fingerprint/foo-*/output-*").count(),
@@ -188,12 +199,11 @@ fn clears_cache_after_fix() {
 
     // And again, check the cache is correct.
     p.cargo("check")
-        .with_stdout("")
-        .with_stderr(
-            "\
-[FINISHED] [..]
-",
-        )
+        .with_stdout_data("")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -255,6 +265,7 @@ fn very_verbose() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             bar = "1.0"
@@ -264,13 +275,39 @@ fn very_verbose() {
         .build();
 
     p.cargo("check -vv")
-        .with_stderr_contains("[..]not_used[..]")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to latest compatible version
+[DOWNLOADING] crates ...
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
+[CHECKING] bar v1.0.0
+[RUNNING] [..]
+[WARNING] function `not_used` is never used
+...
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] [..]
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
-    p.cargo("check").with_stderr("[FINISHED] [..]").run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
 
     p.cargo("check -vv")
-        .with_stderr_contains("[..]not_used[..]")
+        .with_stderr_data(str![[r#"
+[FRESH] bar v1.0.0
+[WARNING] function `not_used` is never used
+...
+[WARNING] `bar` (lib) generated 1 warning
+[FRESH] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -288,6 +325,7 @@ fn doesnt_create_extra_files() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 dep = "1.0"
@@ -297,7 +335,7 @@ fn doesnt_create_extra_files() {
         .file("src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("build").run();
+    p.cargo("check").run();
 
     assert_eq!(
         p.glob("target/debug/.fingerprint/foo-*/output-*").count(),
@@ -311,7 +349,7 @@ fn doesnt_create_extra_files() {
         sleep_ms(1000);
     }
     p.change_file("src/lib.rs", "fn unused() {}");
-    p.cargo("build").run();
+    p.cargo("check").run();
     assert_eq!(
         p.glob("target/debug/.fingerprint/foo-*/output-*").count(),
         1
@@ -342,25 +380,23 @@ fn replay_non_json() {
     let p = project().file("src/lib.rs", "").build();
     p.cargo("check")
         .env("RUSTC", rustc.bin("rustc_alt"))
-        .with_stderr(
-            "\
-[CHECKING] foo [..]
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
 line 1
 line 2
-[FINISHED] dev [..]
-",
-        )
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     p.cargo("check")
         .env("RUSTC", rustc.bin("rustc_alt"))
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 line 1
 line 2
-[FINISHED] dev [..]
-",
-        )
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -403,11 +439,11 @@ fn caching_large_output() {
     let p = project().file("src/lib.rs", "").build();
     p.cargo("check")
         .env("RUSTC", rustc.bin("rustc_alt"))
-        .with_stderr(&format!(
+        .with_stderr_data(&format!(
             "\
-[CHECKING] foo [..]
-{}warning: `foo` (lib) generated 250 warnings
-[FINISHED] dev [..]
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+{}[WARNING] `foo` (lib) generated 250 warnings
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 ",
             expected
         ))
@@ -415,10 +451,10 @@ fn caching_large_output() {
 
     p.cargo("check")
         .env("RUSTC", rustc.bin("rustc_alt"))
-        .with_stderr(&format!(
+        .with_stderr_data(&format!(
             "\
-{}warning: `foo` (lib) generated 250 warnings
-[FINISHED] dev [..]
+{}[WARNING] `foo` (lib) generated 250 warnings
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 ",
             expected
         ))
@@ -437,36 +473,61 @@ fn rustc_workspace_wrapper() {
 
     p.cargo("check -v")
         .env("RUSTC_WORKSPACE_WRAPPER", tools::echo_wrapper())
-        .with_stderr_contains("WRAPPER CALLED: rustc --crate-name foo src/lib.rs [..]")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] [..]/rustc-echo-wrapper[EXE] rustc --crate-name foo [..]
+WRAPPER CALLED: rustc --crate-name foo --edition=2015 src/lib.rs [..]
+[WARNING] function `unused_func` is never used
+...
+[WARNING] `foo` (lib) generated 1 warning
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     // Check without a wrapper should rebuild
     p.cargo("check -v")
-        .with_stderr_contains(
-            "\
-[CHECKING] foo [..]
-[RUNNING] `rustc[..]
-[WARNING] [..]unused_func[..]
-",
-        )
-        .with_stdout_does_not_contain("WRAPPER CALLED: rustc --crate-name foo src/lib.rs [..]")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc[..]`
+[WARNING] function `unused_func` is never used
+...
+[WARNING] `foo` (lib) generated 1 warning
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .with_stdout_data("")
         .run();
 
     // Again, reading from the cache.
     p.cargo("check -v")
         .env("RUSTC_WORKSPACE_WRAPPER", tools::echo_wrapper())
-        .with_stderr_contains("[FRESH] foo [..]")
-        .with_stdout_does_not_contain("WRAPPER CALLED: rustc --crate-name foo src/lib.rs [..]")
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+WRAPPER CALLED: rustc [..]
+...
+[WARNING] `foo` (lib) generated 1 warning
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .with_stdout_data("")
         .run();
 
     // And `check` should also be fresh, reading from cache.
     p.cargo("check -v")
-        .with_stderr_contains("[FRESH] foo [..]")
-        .with_stderr_contains("[WARNING] [..]unused_func[..]")
-        .with_stdout_does_not_contain("WRAPPER CALLED: rustc --crate-name foo src/lib.rs [..]")
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[WARNING] function `unused_func` is never used
+...
+[WARNING] `foo` (lib) generated 1 warning
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .with_stdout_data("")
         .run();
 }
 
+#[expect(deprecated)]
 #[cargo_test]
 fn wacky_hashless_fingerprint() {
     // On Windows, executables don't have hashes. This checks for a bad
@@ -475,14 +536,21 @@ fn wacky_hashless_fingerprint() {
         .file("src/bin/a.rs", "fn main() { let unused = 1; }")
         .file("src/bin/b.rs", "fn main() {}")
         .build();
-    p.cargo("build --bin b")
+    p.cargo("check --bin b")
         .with_stderr_does_not_contain("[..]unused[..]")
         .run();
-    p.cargo("build --bin a")
-        .with_stderr_contains("[..]unused[..]")
+    p.cargo("check --bin a")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[WARNING] unused variable: `unused`
+...
+[WARNING] `foo` (bin "a") generated 1 warning
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     // This should not pick up the cache from `a`.
-    p.cargo("build --bin b")
+    p.cargo("check --bin b")
         .with_stderr_does_not_contain("[..]unused[..]")
         .run();
 }

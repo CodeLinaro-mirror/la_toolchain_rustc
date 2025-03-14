@@ -12,7 +12,7 @@ my\-command \- A brief description
 .br
 \fBmy\-command\fR (\fB\-m\fR | \fB\-M\fR) [\fIoldbranch\fR] \fInewbranch\fR
 .br
-\fBmy\-command\fR (\fB\-d\fR | \fB\-D\fR) [\fB\-r\fR] \fIbranchname\fR\&...
+\fBmy\-command\fR (\fB\-d\fR | \fB\-D\fR) [\fB\-r\fR] \fIbranchname\fR\[u2026]
 .SH "DESCRIPTION"
 A description of the command.
 .sp
@@ -49,7 +49,7 @@ Demo \fIemphasis\fR, \fBstrong\fR, ~~strike~~
 This has multiple flags.
 .RE
 .sp
-\fInamed\-arg...\fR
+\fInamed\-arg\[u2026]\fR
 .RS 4
 A named argument.
 .RE
@@ -68,6 +68,11 @@ Flag with optional value.
 \fB\-\-foo\fR[\fB=\fR\fIbar\fR]
 .RS 4
 Alternate syntax for optional value (with required = for disambiguation).
+.RE
+.sp
+\fB\-\-split\-block\fR
+.RS 4
+An option where the description has a \fBblock statement that is split across multiple lines\fR
 .RE
 .SH "EXAMPLES"
 .sp

@@ -14,21 +14,29 @@ use std::{
     marker::PhantomData,
 };
 
+use rowan::TextRange;
+
 use crate::{syntax_node::RustLanguage, AstNode, SyntaxNode};
 
 /// A "pointer" to a [`SyntaxNode`], via location in the source code.
 pub type SyntaxNodePtr = rowan::ast::SyntaxNodePtr<RustLanguage>;
 
 /// Like `SyntaxNodePtr`, but remembers the type of node.
-#[derive(Debug)]
 pub struct AstPtr<N: AstNode> {
     raw: SyntaxNodePtr,
     _ty: PhantomData<fn() -> N>,
 }
 
+impl<N: AstNode + std::fmt::Debug> std::fmt::Debug for AstPtr<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AstPtr").field(&self.raw).finish()
+    }
+}
+
+impl<N: AstNode> Copy for AstPtr<N> {}
 impl<N: AstNode> Clone for AstPtr<N> {
     fn clone(&self) -> AstPtr<N> {
-        AstPtr { raw: self.raw.clone(), _ty: PhantomData }
+        *self
     }
 }
 
@@ -57,7 +65,11 @@ impl<N: AstNode> AstPtr<N> {
     }
 
     pub fn syntax_node_ptr(&self) -> SyntaxNodePtr {
-        self.raw.clone()
+        self.raw
+    }
+
+    pub fn text_range(&self) -> TextRange {
+        self.raw.text_range()
     }
 
     pub fn cast<U: AstNode>(self) -> Option<AstPtr<U>> {
@@ -67,9 +79,34 @@ impl<N: AstNode> AstPtr<N> {
         Some(AstPtr { raw: self.raw, _ty: PhantomData })
     }
 
+    pub fn kind(&self) -> parser::SyntaxKind {
+        self.raw.kind()
+    }
+
+    pub fn upcast<M: AstNode>(self) -> AstPtr<M>
+    where
+        N: Into<M>,
+    {
+        AstPtr { raw: self.raw, _ty: PhantomData }
+    }
+
     /// Like `SyntaxNodePtr::cast` but the trait bounds work out.
     pub fn try_from_raw(raw: SyntaxNodePtr) -> Option<AstPtr<N>> {
-        N::can_cast(raw.kind()).then(|| AstPtr { raw, _ty: PhantomData })
+        N::can_cast(raw.kind()).then_some(AstPtr { raw, _ty: PhantomData })
+    }
+
+    pub fn wrap_left<R>(self) -> AstPtr<either::Either<N, R>>
+    where
+        either::Either<N, R>: AstNode,
+    {
+        AstPtr { raw: self.raw, _ty: PhantomData }
+    }
+
+    pub fn wrap_right<L>(self) -> AstPtr<either::Either<L, N>>
+    where
+        either::Either<L, N>: AstNode,
+    {
+        AstPtr { raw: self.raw, _ty: PhantomData }
     }
 }
 
@@ -83,7 +120,7 @@ impl<N: AstNode> From<AstPtr<N>> for SyntaxNodePtr {
 fn test_local_syntax_ptr() {
     use crate::{ast, AstNode, SourceFile};
 
-    let file = SourceFile::parse("struct Foo { f: u32, }").ok().unwrap();
+    let file = SourceFile::parse("struct Foo { f: u32, }", parser::Edition::CURRENT).ok().unwrap();
     let field = file.syntax().descendants().find_map(ast::RecordField::cast).unwrap();
     let ptr = SyntaxNodePtr::new(field.syntax());
     let field_syntax = ptr.to_node(file.syntax());

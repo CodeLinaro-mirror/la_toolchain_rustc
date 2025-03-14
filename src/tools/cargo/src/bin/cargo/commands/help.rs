@@ -1,8 +1,10 @@
 use crate::aliased_command;
+use crate::command_prelude::*;
+use cargo::drop_println;
 use cargo::util::errors::CargoResult;
-use cargo::{drop_println, Config};
 use cargo_util::paths::resolve_executable;
 use flate2::read::GzDecoder;
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io::Read;
 use std::io::Write;
@@ -10,48 +12,57 @@ use std::path::Path;
 
 const COMPRESSED_MAN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/man.tgz"));
 
-/// Checks if the `help` command is being issued.
-///
-/// This runs before clap processing, because it needs to intercept the `help`
-/// command if a man page is available.
-///
-/// Returns `true` if help information was successfully displayed to the user.
-/// In this case, Cargo should exit.
-pub fn handle_embedded_help(config: &Config) -> bool {
-    match try_help(config) {
-        Ok(true) => true,
-        Ok(false) => false,
-        Err(e) => {
-            log::warn!("help failed: {:?}", e);
-            false
-        }
-    }
+pub fn cli() -> Command {
+    subcommand("help")
+        .about("Displays help for a cargo subcommand")
+        .arg(Arg::new("COMMAND").action(ArgAction::Set).add(
+            clap_complete::ArgValueCandidates::new(|| {
+                super::builtin()
+                    .iter()
+                    .map(|cmd| {
+                        let name = cmd.get_name();
+                        clap_complete::CompletionCandidate::new(name)
+                            .help(cmd.get_about().cloned())
+                            .hide(cmd.is_hide_set())
+                    })
+                    .collect()
+            }),
+        ))
 }
 
-fn try_help(config: &Config) -> CargoResult<bool> {
-    let mut args = std::env::args_os()
-        .skip(1)
-        .skip_while(|arg| arg.to_str().map_or(false, |s| s.starts_with('-')));
-    if !args
-        .next()
-        .map_or(false, |arg| arg.to_str() == Some("help"))
-    {
-        return Ok(false);
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let subcommand = args.get_one::<String>("COMMAND");
+    if let Some(subcommand) = subcommand {
+        if !try_help(gctx, subcommand)? {
+            match check_builtin(&subcommand) {
+                Some(s) => {
+                    crate::execute_internal_subcommand(
+                        gctx,
+                        &[OsStr::new(s), OsStr::new("--help")],
+                    )?;
+                }
+                None => {
+                    crate::execute_external_subcommand(
+                        gctx,
+                        subcommand,
+                        &[OsStr::new(subcommand), OsStr::new("--help")],
+                    )?;
+                }
+            }
+        }
+    } else {
+        let mut cmd = crate::cli::cli(gctx);
+        let _ = cmd.print_help();
     }
-    let subcommand = match args.next() {
-        Some(arg) => arg,
-        None => return Ok(false),
-    };
-    let subcommand = match subcommand.to_str() {
-        Some(s) => s,
-        None => return Ok(false),
-    };
+    Ok(())
+}
 
-    let subcommand = match check_alias(config, subcommand) {
+fn try_help(gctx: &GlobalContext, subcommand: &str) -> CargoResult<bool> {
+    let subcommand = match check_alias(gctx, subcommand) {
         // If this alias is more than a simple subcommand pass-through, show the alias.
         Some(argv) if argv.len() > 1 => {
             let alias = argv.join(" ");
-            drop_println!(config, "`{}` is aliased to `{}`", subcommand, alias);
+            drop_println!(gctx, "`{}` is aliased to `{}`", subcommand, alias);
             return Ok(true);
         }
         // Otherwise, resolve the alias into its subcommand.
@@ -93,8 +104,8 @@ fn try_help(config: &Config) -> CargoResult<bool> {
 /// Checks if the given subcommand is an alias.
 ///
 /// Returns None if it is not an alias.
-fn check_alias(config: &Config, subcommand: &str) -> Option<Vec<String>> {
-    aliased_command(config, subcommand).ok().flatten()
+fn check_alias(gctx: &GlobalContext, subcommand: &str) -> Option<Vec<String>> {
+    aliased_command(gctx, subcommand).ok().flatten()
 }
 
 /// Checks if the given subcommand is a built-in command (not via an alias).

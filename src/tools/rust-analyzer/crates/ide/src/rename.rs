@@ -4,16 +4,16 @@
 //! tests. This module also implements a couple of magic tricks, like renaming
 //! `self` and to `self` (to switch between associated function and method).
 
-use hir::{AsAssocItem, InFile, Semantics};
+use hir::{AsAssocItem, HirFileIdExt, InFile, Semantics};
 use ide_db::{
-    base_db::FileId,
     defs::{Definition, NameClass, NameRefClass},
     rename::{bail, format_err, source_edit_from_references, IdentifierKind},
-    RootDatabase,
+    source_change::SourceChangeBuilder,
+    FileId, FileRange, RootDatabase,
 };
 use itertools::Itertools;
 use stdx::{always, never};
-use syntax::{ast, AstNode, SyntaxNode};
+use syntax::{ast, AstNode, SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 use text_edit::TextEdit;
 
@@ -30,28 +30,33 @@ pub(crate) fn prepare_rename(
     position: FilePosition,
 ) -> RenameResult<RangeInfo<()>> {
     let sema = Semantics::new(db);
-    let source_file = sema.parse(position.file_id);
+    let source_file = sema.parse_guess_edition(position.file_id);
     let syntax = source_file.syntax();
 
     let res = find_definitions(&sema, syntax, position)?
-        .map(|(name_like, def)| {
+        .map(|(frange, kind, def)| {
             // ensure all ranges are valid
 
             if def.range_for_rename(&sema).is_none() {
                 bail!("No references found at position")
             }
-            let frange = sema.original_range(name_like.syntax());
 
             always!(
                 frange.range.contains_inclusive(position.offset)
                     && frange.file_id == position.file_id
             );
-            Ok(frange.range)
+
+            Ok(match kind {
+                SyntaxKind::LIFETIME => {
+                    TextRange::new(frange.range.start() + TextSize::from(1), frange.range.end())
+                }
+                _ => frange.range,
+            })
         })
         .reduce(|acc, cur| match (acc, cur) {
             // ensure all ranges are the same
             (Ok(acc_inner), Ok(cur_inner)) if acc_inner == cur_inner => Ok(acc_inner),
-            (Err(e), _) => Err(e),
+            (e @ Err(_), _) | (_, e @ Err(_)) => e,
             _ => bail!("inconsistent text range"),
         });
 
@@ -79,28 +84,70 @@ pub(crate) fn rename(
     new_name: &str,
 ) -> RenameResult<SourceChange> {
     let sema = Semantics::new(db);
-    let source_file = sema.parse(position.file_id);
+    let file_id = sema
+        .attach_first_edition(position.file_id)
+        .ok_or_else(|| format_err!("No references found at position"))?;
+    let source_file = sema.parse(file_id);
     let syntax = source_file.syntax();
 
     let defs = find_definitions(&sema, syntax, position)?;
+    let alias_fallback = alias_fallback(syntax, position, new_name);
 
-    let ops: RenameResult<Vec<SourceChange>> = defs
-        .map(|(_namelike, def)| {
-            if let Definition::Local(local) = def {
-                if let Some(self_param) = local.as_self_param(sema.db) {
-                    cov_mark::hit!(rename_self_to_param);
-                    return rename_self_to_param(&sema, local, self_param, new_name);
+    let ops: RenameResult<Vec<SourceChange>> = match alias_fallback {
+        Some(_) => defs
+            // FIXME: This can use the `ide_db::rename_reference` (or def.rename) method once we can
+            // properly find "direct" usages/references.
+            .map(|(.., def)| {
+                match IdentifierKind::classify(new_name)? {
+                    IdentifierKind::Ident => (),
+                    IdentifierKind::Lifetime => {
+                        bail!("Cannot alias reference to a lifetime identifier")
+                    }
+                    IdentifierKind::Underscore => bail!("Cannot alias reference to `_`"),
+                };
+
+                let mut usages = def.usages(&sema).all();
+
+                // FIXME: hack - removes the usage that triggered this rename operation.
+                match usages.references.get_mut(&file_id).and_then(|refs| {
+                    refs.iter()
+                        .position(|ref_| ref_.range.contains_inclusive(position.offset))
+                        .map(|idx| refs.remove(idx))
+                }) {
+                    Some(_) => (),
+                    None => never!(),
+                };
+
+                let mut source_change = SourceChange::default();
+                source_change.extend(usages.references.get_mut(&file_id).iter().map(|refs| {
+                    (
+                        position.file_id,
+                        source_edit_from_references(refs, def, new_name, file_id.edition()),
+                    )
+                }));
+
+                Ok(source_change)
+            })
+            .collect(),
+        None => defs
+            .map(|(.., def)| {
+                if let Definition::Local(local) = def {
+                    if let Some(self_param) = local.as_self_param(sema.db) {
+                        cov_mark::hit!(rename_self_to_param);
+                        return rename_self_to_param(&sema, local, self_param, new_name);
+                    }
+                    if new_name == "self" {
+                        cov_mark::hit!(rename_to_self);
+                        return rename_to_self(&sema, local);
+                    }
                 }
-                if new_name == "self" {
-                    cov_mark::hit!(rename_to_self);
-                    return rename_to_self(&sema, local);
-                }
-            }
-            def.rename(&sema, new_name)
-        })
-        .collect();
+                def.rename(&sema, new_name)
+            })
+            .collect(),
+    };
 
     ops?.into_iter()
+        .chain(alias_fallback)
         .reduce(|acc, elem| acc.merge(elem))
         .ok_or_else(|| format_err!("No references found at position"))
 }
@@ -112,28 +159,83 @@ pub(crate) fn will_rename_file(
     new_name_stem: &str,
 ) -> Option<SourceChange> {
     let sema = Semantics::new(db);
-    let module = sema.to_module_def(file_id)?;
+    let module = sema.file_to_module_def(file_id)?;
     let def = Definition::Module(module);
     let mut change = def.rename(&sema, new_name_stem).ok()?;
     change.file_system_edits.clear();
     Some(change)
 }
 
-fn find_definitions(
-    sema: &Semantics<RootDatabase>,
+// FIXME: Should support `extern crate`.
+fn alias_fallback(
     syntax: &SyntaxNode,
-    position: FilePosition,
-) -> RenameResult<impl Iterator<Item = (ast::NameLike, Definition)>> {
-    let symbols = sema
-        .find_nodes_at_offset_with_descend::<ast::NameLike>(syntax, position.offset)
-        .map(|name_like| {
+    FilePosition { file_id, offset }: FilePosition,
+    new_name: &str,
+) -> Option<SourceChange> {
+    let use_tree = syntax
+        .token_at_offset(offset)
+        .flat_map(|syntax| syntax.parent_ancestors())
+        .find_map(ast::UseTree::cast)?;
+
+    let last_path_segment = use_tree.path()?.segments().last()?.name_ref()?;
+    if !last_path_segment.syntax().text_range().contains_inclusive(offset) {
+        return None;
+    };
+
+    let mut builder = SourceChangeBuilder::new(file_id);
+
+    match use_tree.rename() {
+        Some(rename) => {
+            let offset = rename.syntax().text_range();
+            builder.replace(offset, format!("as {new_name}"));
+        }
+        None => {
+            let offset = use_tree.syntax().text_range().end();
+            builder.insert(offset, format!(" as {new_name}"));
+        }
+    }
+
+    Some(builder.finish())
+}
+
+fn find_definitions(
+    sema: &Semantics<'_, RootDatabase>,
+    syntax: &SyntaxNode,
+    FilePosition { file_id, offset }: FilePosition,
+) -> RenameResult<impl Iterator<Item = (FileRange, SyntaxKind, Definition)>> {
+    let token = syntax.token_at_offset(offset).find(|t| matches!(t.kind(), SyntaxKind::STRING));
+
+    if let Some((range, Some(resolution))) =
+        token.and_then(|token| sema.check_for_format_args_template(token, offset))
+    {
+        return Ok(vec![(
+            FileRange { file_id, range },
+            SyntaxKind::STRING,
+            Definition::from(resolution),
+        )]
+        .into_iter());
+    }
+
+    let symbols =
+        sema.find_nodes_at_offset_with_descend::<ast::NameLike>(syntax, offset).map(|name_like| {
+            let kind = name_like.syntax().kind();
+            let range = sema
+                .original_range_opt(name_like.syntax())
+                .ok_or_else(|| format_err!("No references found at position"))?;
             let res = match &name_like {
                 // renaming aliases would rename the item being aliased as the HIR doesn't track aliases yet
                 ast::NameLike::Name(name)
                     if name
                         .syntax()
                         .parent()
-                        .map_or(false, |it| ast::Rename::can_cast(it.kind())) =>
+                        .map_or(false, |it| ast::Rename::can_cast(it.kind()))
+                        // FIXME: uncomment this once we resolve to usages to extern crate declarations
+                        // && name
+                        //     .syntax()
+                        //     .ancestors()
+                        //     .nth(2)
+                        //     .map_or(true, |it| !ast::ExternCrate::can_cast(it.kind()))
+                        =>
                 {
                     bail!("Renaming aliases is currently unsupported")
                 }
@@ -144,7 +246,6 @@ fn find_definitions(
                             Definition::Local(local_def)
                         }
                     })
-                    .map(|def| (name_like.clone(), def))
                     .ok_or_else(|| format_err!("No references found at position")),
                 ast::NameLike::NameRef(name_ref) => {
                     NameRefClass::classify(sema, name_ref)
@@ -153,17 +254,22 @@ fn find_definitions(
                             NameRefClass::FieldShorthand { local_ref, field_ref: _ } => {
                                 Definition::Local(local_ref)
                             }
+                            NameRefClass::ExternCrateShorthand { decl, .. } => {
+                                Definition::ExternCrateDecl(decl)
+                            }
                         })
+                        // FIXME: uncomment this once we resolve to usages to extern crate declarations
+                        .filter(|def| !matches!(def, Definition::ExternCrateDecl(..)))
                         .ok_or_else(|| format_err!("No references found at position"))
                         .and_then(|def| {
                             // if the name differs from the definitions name it has to be an alias
                             if def
                                 .name(sema.db)
-                                .map_or(false, |it| it.to_smol_str() != name_ref.text().as_str())
+                                .map_or(false, |it| !it.eq_ident(name_ref.text().as_str()))
                             {
                                 Err(format_err!("Renaming aliases is currently unsupported"))
                             } else {
-                                Ok((name_like.clone(), def))
+                                Ok(def)
                             }
                         })
                 }
@@ -179,11 +285,10 @@ fn find_definitions(
                                 _ => None,
                             })
                         })
-                        .map(|def| (name_like, def))
                         .ok_or_else(|| format_err!("No references found at position"))
                 }
             };
-            res
+            res.map(|def| (range, kind, def))
         });
 
     let res: RenameResult<Vec<_>> = symbols.collect();
@@ -194,14 +299,21 @@ fn find_definitions(
                 Err(format_err!("No references found at position"))
             } else {
                 // remove duplicates, comparing `Definition`s
-                Ok(v.into_iter().unique_by(|t| t.1))
+                Ok(v.into_iter()
+                    .unique_by(|&(.., def)| def)
+                    .map(|(a, b, c)| (a.into(), b, c))
+                    .collect::<Vec<_>>()
+                    .into_iter())
             }
         }
         Err(e) => Err(e),
     }
 }
 
-fn rename_to_self(sema: &Semantics<RootDatabase>, local: hir::Local) -> RenameResult<SourceChange> {
+fn rename_to_self(
+    sema: &Semantics<'_, RootDatabase>,
+    local: hir::Local,
+) -> RenameResult<SourceChange> {
     if never!(local.is_self(sema.db)) {
         bail!("rename_to_self invoked on self");
     }
@@ -219,8 +331,13 @@ fn rename_to_self(sema: &Semantics<RootDatabase>, local: hir::Local) -> RenameRe
     let first_param = params
         .first()
         .ok_or_else(|| format_err!("Cannot rename local to self unless it is a parameter"))?;
-    if first_param.as_local(sema.db) != local {
-        bail!("Only the first parameter may be renamed to self");
+    match first_param.as_local(sema.db) {
+        Some(plocal) => {
+            if plocal != local {
+                bail!("Only the first parameter may be renamed to self");
+            }
+        }
+        None => bail!("rename_to_self invoked on destructuring parameter"),
     }
 
     let assoc_item = fn_def
@@ -247,14 +364,15 @@ fn rename_to_self(sema: &Semantics<RootDatabase>, local: hir::Local) -> RenameRe
         bail!("Parameter type differs from impl block type");
     }
 
-    let InFile { file_id, value: param_source } =
-        first_param.source(sema.db).ok_or_else(|| format_err!("No source for parameter found"))?;
+    let InFile { file_id, value: param_source } = sema
+        .source(first_param.clone())
+        .ok_or_else(|| format_err!("No source for parameter found"))?;
 
     let def = Definition::Local(local);
     let usages = def.usages(sema).all();
     let mut source_change = SourceChange::default();
-    source_change.extend(usages.iter().map(|(&file_id, references)| {
-        (file_id, source_edit_from_references(references, def, "self"))
+    source_change.extend(usages.iter().map(|(file_id, references)| {
+        (file_id.into(), source_edit_from_references(references, def, "self", file_id.edition()))
     }));
     source_change.insert_source_edit(
         file_id.original_file(sema.db),
@@ -264,7 +382,7 @@ fn rename_to_self(sema: &Semantics<RootDatabase>, local: hir::Local) -> RenameRe
 }
 
 fn rename_self_to_param(
-    sema: &Semantics<RootDatabase>,
+    sema: &Semantics<'_, RootDatabase>,
     local: hir::Local,
     self_param: hir::SelfParam,
     new_name: &str,
@@ -278,7 +396,7 @@ fn rename_self_to_param(
     let identifier_kind = IdentifierKind::classify(new_name)?;
 
     let InFile { file_id, value: self_param } =
-        self_param.source(sema.db).ok_or_else(|| format_err!("cannot find function source"))?;
+        sema.source(self_param).ok_or_else(|| format_err!("cannot find function source"))?;
 
     let def = Definition::Local(local);
     let usages = def.usages(sema).all();
@@ -289,8 +407,8 @@ fn rename_self_to_param(
     }
     let mut source_change = SourceChange::default();
     source_change.insert_source_edit(file_id.original_file(sema.db), edit);
-    source_change.extend(usages.iter().map(|(&file_id, references)| {
-        (file_id, source_edit_from_references(references, def, new_name))
+    source_change.extend(usages.iter().map(|(file_id, references)| {
+        (file_id.into(), source_edit_from_references(references, def, new_name, file_id.edition()))
     }));
     Ok(source_change)
 }
@@ -321,11 +439,12 @@ fn text_edit_from_self_param(self_param: &ast::SelfParam, new_name: &str) -> Opt
 #[cfg(test)]
 mod tests {
     use expect_test::{expect, Expect};
+    use ide_db::source_change::SourceChange;
     use stdx::trim_indent;
     use test_utils::assert_eq_text;
     use text_edit::TextEdit;
 
-    use crate::{fixture, FileId};
+    use crate::fixture;
 
     use super::{RangeInfo, RenameError};
 
@@ -333,35 +452,36 @@ mod tests {
     fn check(new_name: &str, ra_fixture_before: &str, ra_fixture_after: &str) {
         let ra_fixture_after = &trim_indent(ra_fixture_after);
         let (analysis, position) = fixture::position(ra_fixture_before);
+        if !ra_fixture_after.starts_with("error: ") {
+            if let Err(err) = analysis.prepare_rename(position).unwrap() {
+                panic!("Prepare rename to '{new_name}' was failed: {err}")
+            }
+        }
         let rename_result = analysis
             .rename(position, new_name)
-            .unwrap_or_else(|err| panic!("Rename to '{}' was cancelled: {}", new_name, err));
+            .unwrap_or_else(|err| panic!("Rename to '{new_name}' was cancelled: {err}"));
         match rename_result {
             Ok(source_change) => {
                 let mut text_edit_builder = TextEdit::builder();
-                let mut file_id: Option<FileId> = None;
-                for edit in source_change.source_file_edits {
-                    file_id = Some(edit.0);
-                    for indel in edit.1.into_iter() {
-                        text_edit_builder.replace(indel.delete, indel.insert);
-                    }
+                let (&file_id, edit) = match source_change.source_file_edits.len() {
+                    0 => return,
+                    1 => source_change.source_file_edits.iter().next().unwrap(),
+                    _ => panic!(),
+                };
+                for indel in edit.0.iter() {
+                    text_edit_builder.replace(indel.delete, indel.insert.clone());
                 }
-                if let Some(file_id) = file_id {
-                    let mut result = analysis.file_text(file_id).unwrap().to_string();
-                    text_edit_builder.finish().apply(&mut result);
-                    assert_eq_text!(ra_fixture_after, &*result);
-                }
+                let mut result = analysis.file_text(file_id).unwrap().to_string();
+                text_edit_builder.finish().apply(&mut result);
+                assert_eq_text!(ra_fixture_after, &*result);
             }
             Err(err) => {
                 if ra_fixture_after.starts_with("error:") {
-                    let error_message = ra_fixture_after
-                        .chars()
-                        .into_iter()
-                        .skip("error:".len())
-                        .collect::<String>();
+                    let error_message =
+                        ra_fixture_after.chars().skip("error:".len()).collect::<String>();
                     assert_eq!(error_message.trim(), err.to_string());
                 } else {
-                    panic!("Rename to '{}' failed unexpectedly: {}", new_name, err)
+                    panic!("Rename to '{new_name}' failed unexpectedly: {err}")
                 }
             }
         };
@@ -371,27 +491,49 @@ mod tests {
         let (analysis, position) = fixture::position(ra_fixture);
         let source_change =
             analysis.rename(position, new_name).unwrap().expect("Expect returned a RenameError");
-        expect.assert_debug_eq(&source_change)
+        expect.assert_eq(&filter_expect(source_change))
+    }
+
+    fn check_expect_will_rename_file(new_name: &str, ra_fixture: &str, expect: Expect) {
+        let (analysis, position) = fixture::position(ra_fixture);
+        let source_change = analysis
+            .will_rename_file(position.file_id, new_name)
+            .unwrap()
+            .expect("Expect returned a RenameError");
+        expect.assert_eq(&filter_expect(source_change))
     }
 
     fn check_prepare(ra_fixture: &str, expect: Expect) {
         let (analysis, position) = fixture::position(ra_fixture);
         let result = analysis
             .prepare_rename(position)
-            .unwrap_or_else(|err| panic!("PrepareRename was cancelled: {}", err));
+            .unwrap_or_else(|err| panic!("PrepareRename was cancelled: {err}"));
         match result {
             Ok(RangeInfo { range, info: () }) => {
                 let source = analysis.file_text(position.file_id).unwrap();
-                expect.assert_eq(&format!("{:?}: {}", range, &source[range]))
+                expect.assert_eq(&format!("{range:?}: {}", &source[range]))
             }
             Err(RenameError(err)) => expect.assert_eq(&err),
         };
     }
 
+    fn filter_expect(source_change: SourceChange) -> String {
+        let source_file_edits = source_change
+            .source_file_edits
+            .into_iter()
+            .map(|(id, (text_edit, _))| (id, text_edit.into_iter().collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+
+        format!(
+            "source_file_edits: {:#?}\nfile_system_edits: {:#?}\n",
+            source_file_edits, source_change.file_system_edits
+        )
+    }
+
     #[test]
     fn test_prepare_rename_namelikes() {
         check_prepare(r"fn name$0<'lifetime>() {}", expect![[r#"3..7: name"#]]);
-        check_prepare(r"fn name<'lifetime$0>() {}", expect![[r#"8..17: 'lifetime"#]]);
+        check_prepare(r"fn name<'lifetime$0>() {}", expect![[r#"9..17: lifetime"#]]);
         check_prepare(r"fn name<'lifetime>() { name$0(); }", expect![[r#"23..27: name"#]]);
     }
 
@@ -487,9 +629,9 @@ impl Foo {
     #[test]
     fn test_rename_to_invalid_identifier3() {
         check(
-            "let",
+            "super",
             r#"fn main() { let i$0 = 1; }"#,
-            "error: Invalid name `let`: not an identifier",
+            "error: Invalid name `super`: not an identifier",
         );
     }
 
@@ -505,12 +647,16 @@ impl Foo {
 
     #[test]
     fn test_rename_to_invalid_identifier_lifetime2() {
-        cov_mark::check!(rename_not_a_lifetime_ident_ref);
         check(
-            "foo",
+            "_",
             r#"fn main<'a>(_: &'a$0 ()) {}"#,
-            "error: Invalid name `foo`: not a lifetime identifier",
+            r#"error: Invalid name `_`: not a lifetime identifier"#,
         );
+    }
+
+    #[test]
+    fn test_rename_accepts_lifetime_without_apostrophe() {
+        check("foo", r#"fn main<'a>(_: &'a$0 ()) {}"#, r#"fn main<'foo>(_: &'foo ()) {}"#);
     }
 
     #[test]
@@ -530,6 +676,11 @@ impl Foo {
             r#"mod foo$0 {}"#,
             "error: Invalid name `'foo`: cannot rename module to 'foo",
         );
+    }
+
+    #[test]
+    fn test_rename_mod_invalid_raw_ident() {
+        check("r#self", r#"mod foo$0 {}"#, "error: Invalid name `self`: not an identifier");
     }
 
     #[test]
@@ -847,34 +998,32 @@ mod foo$0;
 // empty
 "#,
             expect![[r#"
-                SourceChange {
-                    source_file_edits: {
+                source_file_edits: [
+                    (
                         FileId(
                             1,
-                        ): TextEdit {
-                            indels: [
-                                Indel {
-                                    insert: "foo2",
-                                    delete: 4..7,
-                                },
-                            ],
-                        },
-                    },
-                    file_system_edits: [
-                        MoveFile {
-                            src: FileId(
+                        ),
+                        [
+                            Indel {
+                                insert: "foo2",
+                                delete: 4..7,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: [
+                    MoveFile {
+                        src: FileId(
+                            2,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
                                 2,
                             ),
-                            dst: AnchoredPathBuf {
-                                anchor: FileId(
-                                    2,
-                                ),
-                                path: "foo2.rs",
-                            },
+                            path: "foo2.rs",
                         },
-                    ],
-                    is_snippet: false,
-                }
+                    },
+                ]
             "#]],
         );
     }
@@ -896,44 +1045,43 @@ pub struct FooContent;
 use crate::foo$0::FooContent;
 "#,
             expect![[r#"
-                SourceChange {
-                    source_file_edits: {
+                source_file_edits: [
+                    (
                         FileId(
                             0,
-                        ): TextEdit {
-                            indels: [
-                                Indel {
-                                    insert: "quux",
-                                    delete: 8..11,
-                                },
-                            ],
-                        },
+                        ),
+                        [
+                            Indel {
+                                insert: "quux",
+                                delete: 8..11,
+                            },
+                        ],
+                    ),
+                    (
                         FileId(
                             2,
-                        ): TextEdit {
-                            indels: [
-                                Indel {
-                                    insert: "quux",
-                                    delete: 11..14,
-                                },
-                            ],
-                        },
-                    },
-                    file_system_edits: [
-                        MoveFile {
-                            src: FileId(
+                        ),
+                        [
+                            Indel {
+                                insert: "quux",
+                                delete: 11..14,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: [
+                    MoveFile {
+                        src: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
                                 1,
                             ),
-                            dst: AnchoredPathBuf {
-                                anchor: FileId(
-                                    1,
-                                ),
-                                path: "quux.rs",
-                            },
+                            path: "quux.rs",
                         },
-                    ],
-                    is_snippet: false,
-                }
+                    },
+                ]
             "#]],
         );
     }
@@ -949,34 +1097,38 @@ mod fo$0o;
 // empty
 "#,
             expect![[r#"
-                SourceChange {
-                    source_file_edits: {
+                source_file_edits: [
+                    (
                         FileId(
                             0,
-                        ): TextEdit {
-                            indels: [
-                                Indel {
-                                    insert: "foo2",
-                                    delete: 4..7,
-                                },
-                            ],
-                        },
-                    },
-                    file_system_edits: [
-                        MoveFile {
-                            src: FileId(
+                        ),
+                        [
+                            Indel {
+                                insert: "foo2",
+                                delete: 4..7,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: [
+                    MoveDir {
+                        src: AnchoredPathBuf {
+                            anchor: FileId(
                                 1,
                             ),
-                            dst: AnchoredPathBuf {
-                                anchor: FileId(
-                                    1,
-                                ),
-                                path: "../foo2/mod.rs",
-                            },
+                            path: "../foo",
                         },
-                    ],
-                    is_snippet: false,
-                }
+                        src_id: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "../foo2",
+                        },
+                    },
+                ]
             "#]],
         );
     }
@@ -993,34 +1145,32 @@ mod outer { mod fo$0o; }
 // empty
 "#,
             expect![[r#"
-                SourceChange {
-                    source_file_edits: {
+                source_file_edits: [
+                    (
                         FileId(
                             0,
-                        ): TextEdit {
-                            indels: [
-                                Indel {
-                                    insert: "bar",
-                                    delete: 16..19,
-                                },
-                            ],
-                        },
-                    },
-                    file_system_edits: [
-                        MoveFile {
-                            src: FileId(
+                        ),
+                        [
+                            Indel {
+                                insert: "bar",
+                                delete: 16..19,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: [
+                    MoveFile {
+                        src: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
                                 1,
                             ),
-                            dst: AnchoredPathBuf {
-                                anchor: FileId(
-                                    1,
-                                ),
-                                path: "bar.rs",
-                            },
+                            path: "bar.rs",
                         },
-                    ],
-                    is_snippet: false,
-                }
+                    },
+                ]
             "#]],
         );
     }
@@ -1066,48 +1216,118 @@ pub mod foo$0;
 // pub fn fun() {}
 "#,
             expect![[r#"
-                SourceChange {
-                    source_file_edits: {
+                source_file_edits: [
+                    (
                         FileId(
                             0,
-                        ): TextEdit {
-                            indels: [
-                                Indel {
-                                    insert: "foo2",
-                                    delete: 27..30,
-                                },
-                            ],
-                        },
+                        ),
+                        [
+                            Indel {
+                                insert: "foo2",
+                                delete: 27..30,
+                            },
+                        ],
+                    ),
+                    (
                         FileId(
                             1,
-                        ): TextEdit {
-                            indels: [
-                                Indel {
-                                    insert: "foo2",
-                                    delete: 8..11,
-                                },
-                            ],
-                        },
-                    },
-                    file_system_edits: [
-                        MoveFile {
-                            src: FileId(
+                        ),
+                        [
+                            Indel {
+                                insert: "foo2",
+                                delete: 8..11,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: [
+                    MoveFile {
+                        src: FileId(
+                            2,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
                                 2,
                             ),
-                            dst: AnchoredPathBuf {
-                                anchor: FileId(
-                                    2,
-                                ),
-                                path: "foo2.rs",
-                            },
+                            path: "foo2.rs",
                         },
-                    ],
-                    is_snippet: false,
-                }
+                    },
+                ]
             "#]],
         );
     }
 
+    #[test]
+    fn test_rename_mod_recursive() {
+        check_expect(
+            "foo2",
+            r#"
+//- /lib.rs
+mod foo$0;
+
+//- /foo.rs
+mod bar;
+mod corge;
+
+//- /foo/bar.rs
+mod qux;
+
+//- /foo/bar/qux.rs
+mod quux;
+
+//- /foo/bar/qux/quux/mod.rs
+// empty
+
+//- /foo/corge.rs
+// empty
+"#,
+            expect![[r#"
+                source_file_edits: [
+                    (
+                        FileId(
+                            0,
+                        ),
+                        [
+                            Indel {
+                                insert: "foo2",
+                                delete: 4..7,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: [
+                    MoveFile {
+                        src: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "foo2.rs",
+                        },
+                    },
+                    MoveDir {
+                        src: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "foo",
+                        },
+                        src_id: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "foo2",
+                        },
+                    },
+                ]
+            "#]],
+        )
+    }
     #[test]
     fn test_rename_mod_ref_by_super() {
         check(
@@ -1159,6 +1379,381 @@ macro_rules! submodule {
 submodule!(bar);
 "#,
         )
+    }
+
+    #[test]
+    fn test_rename_mod_for_crate_root() {
+        check_expect_will_rename_file(
+            "main",
+            r#"
+//- /lib.rs
+use crate::foo as bar;
+fn foo() {}
+mod bar$0;
+"#,
+            expect![[r#"
+                source_file_edits: []
+                file_system_edits: []
+            "#]],
+        )
+    }
+
+    #[test]
+    fn test_rename_mod_to_raw_ident() {
+        check_expect(
+            "r#fn",
+            r#"
+//- /lib.rs
+mod foo$0;
+
+fn main() { foo::bar::baz(); }
+
+//- /foo.rs
+pub mod bar;
+
+//- /foo/bar.rs
+pub fn baz() {}
+"#,
+            expect![[r#"
+                source_file_edits: [
+                    (
+                        FileId(
+                            0,
+                        ),
+                        [
+                            Indel {
+                                insert: "r#fn",
+                                delete: 4..7,
+                            },
+                            Indel {
+                                insert: "r#fn",
+                                delete: 22..25,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: [
+                    MoveFile {
+                        src: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "fn.rs",
+                        },
+                    },
+                    MoveDir {
+                        src: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "foo",
+                        },
+                        src_id: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "fn",
+                        },
+                    },
+                ]
+            "#]],
+        );
+    }
+
+    #[test]
+    fn test_rename_mod_from_raw_ident() {
+        check_expect(
+            "foo",
+            r#"
+//- /lib.rs
+mod r#fn$0;
+
+fn main() { r#fn::bar::baz(); }
+
+//- /fn.rs
+pub mod bar;
+
+//- /fn/bar.rs
+pub fn baz() {}
+"#,
+            expect![[r#"
+                source_file_edits: [
+                    (
+                        FileId(
+                            0,
+                        ),
+                        [
+                            Indel {
+                                insert: "foo",
+                                delete: 4..8,
+                            },
+                            Indel {
+                                insert: "foo",
+                                delete: 23..27,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: [
+                    MoveFile {
+                        src: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "foo.rs",
+                        },
+                    },
+                    MoveDir {
+                        src: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "fn",
+                        },
+                        src_id: FileId(
+                            1,
+                        ),
+                        dst: AnchoredPathBuf {
+                            anchor: FileId(
+                                1,
+                            ),
+                            path: "foo",
+                        },
+                    },
+                ]
+            "#]],
+        );
+    }
+
+    #[test]
+    fn test_rename_each_usage_gets_appropriate_rawness() {
+        check_expect(
+            "dyn",
+            r#"
+//- /a.rs crate:a edition:2015
+pub fn foo() {}
+
+//- /b.rs crate:b edition:2018 deps:a new_source_root:local
+fn bar() {
+    a::foo$0();
+}
+    "#,
+            expect![[r#"
+                source_file_edits: [
+                    (
+                        FileId(
+                            0,
+                        ),
+                        [
+                            Indel {
+                                insert: "dyn",
+                                delete: 7..10,
+                            },
+                        ],
+                    ),
+                    (
+                        FileId(
+                            1,
+                        ),
+                        [
+                            Indel {
+                                insert: "r#dyn",
+                                delete: 18..21,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: []
+            "#]],
+        );
+
+        check_expect(
+            "dyn",
+            r#"
+//- /a.rs crate:a edition:2018
+pub fn foo() {}
+
+//- /b.rs crate:b edition:2015 deps:a new_source_root:local
+fn bar() {
+    a::foo$0();
+}
+    "#,
+            expect![[r#"
+                source_file_edits: [
+                    (
+                        FileId(
+                            0,
+                        ),
+                        [
+                            Indel {
+                                insert: "r#dyn",
+                                delete: 7..10,
+                            },
+                        ],
+                    ),
+                    (
+                        FileId(
+                            1,
+                        ),
+                        [
+                            Indel {
+                                insert: "dyn",
+                                delete: 18..21,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: []
+            "#]],
+        );
+
+        check_expect(
+            "r#dyn",
+            r#"
+//- /a.rs crate:a edition:2018
+pub fn foo$0() {}
+
+//- /b.rs crate:b edition:2015 deps:a new_source_root:local
+fn bar() {
+    a::foo();
+}
+    "#,
+            expect![[r#"
+                source_file_edits: [
+                    (
+                        FileId(
+                            0,
+                        ),
+                        [
+                            Indel {
+                                insert: "r#dyn",
+                                delete: 7..10,
+                            },
+                        ],
+                    ),
+                    (
+                        FileId(
+                            1,
+                        ),
+                        [
+                            Indel {
+                                insert: "dyn",
+                                delete: 18..21,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: []
+            "#]],
+        );
+    }
+
+    #[test]
+    fn rename_raw_identifier() {
+        check_expect(
+            "abc",
+            r#"
+//- /a.rs crate:a edition:2015
+pub fn dyn() {}
+
+fn foo() {
+    dyn$0();
+}
+
+//- /b.rs crate:b edition:2018 deps:a new_source_root:local
+fn bar() {
+    a::r#dyn();
+}
+    "#,
+            expect![[r#"
+                source_file_edits: [
+                    (
+                        FileId(
+                            0,
+                        ),
+                        [
+                            Indel {
+                                insert: "abc",
+                                delete: 7..10,
+                            },
+                            Indel {
+                                insert: "abc",
+                                delete: 32..35,
+                            },
+                        ],
+                    ),
+                    (
+                        FileId(
+                            1,
+                        ),
+                        [
+                            Indel {
+                                insert: "abc",
+                                delete: 18..23,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: []
+            "#]],
+        );
+
+        check_expect(
+            "abc",
+            r#"
+//- /a.rs crate:a edition:2018
+pub fn r#dyn() {}
+
+fn foo() {
+    r#dyn$0();
+}
+
+//- /b.rs crate:b edition:2015 deps:a new_source_root:local
+fn bar() {
+    a::dyn();
+}
+    "#,
+            expect![[r#"
+                source_file_edits: [
+                    (
+                        FileId(
+                            0,
+                        ),
+                        [
+                            Indel {
+                                insert: "abc",
+                                delete: 7..12,
+                            },
+                            Indel {
+                                insert: "abc",
+                                delete: 34..39,
+                            },
+                        ],
+                    ),
+                    (
+                        FileId(
+                            1,
+                        ),
+                        [
+                            Indel {
+                                insert: "abc",
+                                delete: 18..21,
+                            },
+                        ],
+                    ),
+                ]
+                file_system_edits: []
+            "#]],
+        );
     }
 
     #[test]
@@ -1426,6 +2021,23 @@ struct Foo { bar: i32 }
 
 fn foo(bar: i32) -> Foo {
     Foo { bar }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn test_rename_local_simple() {
+        check(
+            "i",
+            r#"
+fn foo(bar$0: i32) -> i32 {
+    bar
+}
+"#,
+            r#"
+fn foo(i: i32) -> i32 {
+    i
 }
 "#,
         );
@@ -1714,6 +2326,31 @@ fn foo<'a>() -> &'a () {
 }
 "#,
         )
+    }
+
+    #[test]
+    fn test_rename_label_new_name_without_apostrophe() {
+        check(
+            "foo",
+            r#"
+fn main() {
+    'outer$0: loop {
+        'inner: loop {
+            break 'outer;
+        }
+    }
+}
+        "#,
+            r#"
+fn main() {
+    'foo: loop {
+        'inner: loop {
+            break 'foo;
+        }
+    }
+}
+        "#,
+        );
     }
 
     #[test]
@@ -2083,5 +2720,360 @@ fn foo() {
 }
 "#,
         )
+    }
+
+    #[test]
+    fn rename_multi_local() {
+        check(
+            "bar",
+            r#"
+fn foo((foo$0 | foo | foo): ()) {
+    foo;
+    let foo;
+}
+"#,
+            r#"
+fn foo((bar | bar | bar): ()) {
+    bar;
+    let foo;
+}
+"#,
+        );
+        check(
+            "bar",
+            r#"
+fn foo((foo | foo$0 | foo): ()) {
+    foo;
+    let foo;
+}
+"#,
+            r#"
+fn foo((bar | bar | bar): ()) {
+    bar;
+    let foo;
+}
+"#,
+        );
+        check(
+            "bar",
+            r#"
+fn foo((foo | foo | foo): ()) {
+    foo$0;
+    let foo;
+}
+"#,
+            r#"
+fn foo((bar | bar | bar): ()) {
+    bar;
+    let foo;
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn regression_13498() {
+        check(
+            "Testing",
+            r"
+mod foo {
+    pub struct Test$0;
+}
+
+use foo::Test as Tester;
+
+fn main() {
+    let t = Tester;
+}
+",
+            r"
+mod foo {
+    pub struct Testing;
+}
+
+use foo::Testing as Tester;
+
+fn main() {
+    let t = Tester;
+}
+",
+        )
+    }
+
+    #[test]
+    fn extern_crate() {
+        check_prepare(
+            r"
+//- /lib.rs crate:main deps:foo
+extern crate foo$0;
+use foo as qux;
+//- /foo.rs crate:foo
+",
+            expect![[r#"No references found at position"#]],
+        );
+        // FIXME: replace above check_prepare with this once we resolve to usages to extern crate declarations
+        //         check(
+        //             "bar",
+        //             r"
+        // //- /lib.rs crate:main deps:foo
+        // extern crate foo$0;
+        // use foo as qux;
+        // //- /foo.rs crate:foo
+        // ",
+        //             r"
+        // extern crate foo as bar;
+        // use bar as qux;
+        // ",
+        //         );
+    }
+
+    #[test]
+    fn extern_crate_rename() {
+        check_prepare(
+            r"
+//- /lib.rs crate:main deps:foo
+extern crate foo as qux$0;
+use qux as frob;
+//- /foo.rs crate:foo
+",
+            expect!["Renaming aliases is currently unsupported"],
+        );
+        // FIXME: replace above check_prepare with this once we resolve to usages to extern crate
+        // declarations
+        //         check(
+        //             "bar",
+        //             r"
+        // //- /lib.rs crate:main deps:foo
+        // extern crate foo as qux$0;
+        // use qux as frob;
+        // //- /foo.rs crate:foo
+        // ",
+        //             r"
+        // extern crate foo as bar;
+        // use bar as frob;
+        // ",
+        //         );
+    }
+
+    #[test]
+    fn extern_crate_self() {
+        check_prepare(
+            r"
+extern crate self$0;
+use self as qux;
+",
+            expect!["No references found at position"],
+        );
+        // FIXME: replace above check_prepare with this once we resolve to usages to extern crate declarations
+        //         check(
+        //             "bar",
+        //             r"
+        // extern crate self$0;
+        // use self as qux;
+        // ",
+        //             r"
+        // extern crate self as bar;
+        // use self as qux;
+        // ",
+        //         );
+    }
+
+    #[test]
+    fn extern_crate_self_rename() {
+        check_prepare(
+            r"
+//- /lib.rs crate:main deps:foo
+extern crate self as qux$0;
+use qux as frob;
+//- /foo.rs crate:foo
+",
+            expect!["Renaming aliases is currently unsupported"],
+        );
+        // FIXME: replace above check_prepare with this once we resolve to usages to extern crate declarations
+        //         check(
+        //             "bar",
+        //             r"
+        // //- /lib.rs crate:main deps:foo
+        // extern crate self as qux$0;
+        // use qux as frob;
+        // //- /foo.rs crate:foo
+        // ",
+        //             r"
+        // extern crate self as bar;
+        // use bar as frob;
+        // ",
+        //         );
+    }
+
+    #[test]
+    fn disallow_renaming_for_non_local_definition() {
+        check(
+            "Baz",
+            r#"
+//- /lib.rs crate:lib new_source_root:library
+pub struct S;
+//- /main.rs crate:main deps:lib new_source_root:local
+use lib::S;
+fn main() { let _: S$0; }
+"#,
+            "error: Cannot rename a non-local definition",
+        );
+    }
+
+    #[test]
+    fn disallow_renaming_for_builtin_macros() {
+        check(
+            "Baz",
+            r#"
+//- minicore: derive, hash
+//- /main.rs crate:main
+use core::hash::Hash;
+#[derive(H$0ash)]
+struct A;
+            "#,
+            "error: Cannot rename a non-local definition",
+        );
+    }
+
+    #[test]
+    fn implicit_format_args() {
+        check(
+            "fbar",
+            r#"
+//- minicore: fmt
+fn test() {
+    let foo = "foo";
+    format_args!("hello {foo} {foo$0} {}", foo);
+}
+"#,
+            r#"
+fn test() {
+    let fbar = "foo";
+    format_args!("hello {fbar} {fbar} {}", fbar);
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn implicit_format_args2() {
+        check(
+            "fo",
+            r#"
+//- minicore: fmt
+fn test() {
+    let foo = "foo";
+    format_args!("hello {foo} {foo$0} {}", foo);
+}
+"#,
+            r#"
+fn test() {
+    let fo = "foo";
+    format_args!("hello {fo} {fo} {}", fo);
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn asm_operand() {
+        check(
+            "bose",
+            r#"
+//- minicore: asm
+fn test() {
+    core::arch::asm!(
+        "push {base}",
+        base$0 = const 0
+    );
+}
+"#,
+            r#"
+fn test() {
+    core::arch::asm!(
+        "push {bose}",
+        bose = const 0
+    );
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn asm_operand2() {
+        check(
+            "bose",
+            r#"
+//- minicore: asm
+fn test() {
+    core::arch::asm!(
+        "push {base$0}",
+        "push {base}",
+        boo = const 0,
+        virtual_free = sym VIRTUAL_FREE,
+        base = const 0,
+        boo = const 0,
+    );
+}
+"#,
+            r#"
+fn test() {
+    core::arch::asm!(
+        "push {bose}",
+        "push {bose}",
+        boo = const 0,
+        virtual_free = sym VIRTUAL_FREE,
+        bose = const 0,
+        boo = const 0,
+    );
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn rename_path_inside_use_tree() {
+        check(
+            "Baz",
+            r#"
+//- /main.rs crate:main
+mod module;
+mod foo { pub struct Foo; }
+mod bar { use super::Foo; }
+
+use foo::Foo$0;
+
+fn main() { let _: Foo; }
+//- /module.rs
+use crate::foo::Foo;
+"#,
+            r#"
+mod module;
+mod foo { pub struct Foo; }
+mod bar { use super::Baz; }
+
+use foo::Foo as Baz;
+
+fn main() { let _: Baz; }
+"#,
+        )
+    }
+
+    #[test]
+    fn rename_path_inside_use_tree_foreign() {
+        check(
+            "Baz",
+            r#"
+//- /lib.rs crate:lib new_source_root:library
+pub struct S;
+//- /main.rs crate:main deps:lib new_source_root:local
+use lib::S$0;
+fn main() { let _: S; }
+"#,
+            r#"
+use lib::S as Baz;
+fn main() { let _: Baz; }
+"#,
+        );
     }
 }

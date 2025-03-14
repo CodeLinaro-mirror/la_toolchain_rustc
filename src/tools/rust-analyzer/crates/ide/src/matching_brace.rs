@@ -12,7 +12,7 @@ use syntax::{
 // |===
 // | Editor  | Action Name
 //
-// | VS Code | **Rust Analyzer: Find matching brace**
+// | VS Code | **rust-analyzer: Find matching brace**
 // |===
 //
 // image::https://user-images.githubusercontent.com/48062697/113065573-04298180-91b1-11eb-8dec-d4e2a202f304.gif[]
@@ -50,7 +50,7 @@ mod tests {
     fn test_matching_brace() {
         fn do_check(before: &str, after: &str) {
             let (pos, before) = extract_offset(before);
-            let parse = SourceFile::parse(&before);
+            let parse = SourceFile::parse(&before, span::Edition::CURRENT);
             let new_pos = match matching_brace(&parse.tree(), pos) {
                 None => pos,
                 Some(pos) => pos,

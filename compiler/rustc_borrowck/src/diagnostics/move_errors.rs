@@ -1,17 +1,56 @@
-use rustc_const_eval::util::CallDesugaringKind;
-use rustc_errors::{Applicability, DiagnosticBuilder};
-use rustc_infer::infer::TyCtxtInferExt;
-use rustc_middle::mir::*;
-use rustc_middle::ty;
-use rustc_mir_dataflow::move_paths::{
-    IllegalMoveOrigin, IllegalMoveOriginKind, LookupResult, MoveError, MovePathIndex,
-};
-use rustc_span::{sym, Span, DUMMY_SP};
-use rustc_trait_selection::traits::type_known_to_meet_bound_modulo_regions;
+#![allow(rustc::diagnostic_outside_of_impl)]
+#![allow(rustc::untranslatable_diagnostic)]
 
-use crate::diagnostics::{CallKind, UseSpans};
-use crate::prefixes::PrefixSet;
+use rustc_errors::{Applicability, Diag};
+use rustc_hir::intravisit::Visitor;
+use rustc_hir::{CaptureBy, ExprKind, HirId, Node};
+use rustc_middle::bug;
+use rustc_middle::mir::*;
+use rustc_middle::ty::{self, Ty};
+use rustc_mir_dataflow::move_paths::{LookupResult, MovePathIndex};
+use rustc_span::{BytePos, ExpnKind, MacroKind, Span};
+use rustc_trait_selection::error_reporting::traits::FindExprBySpan;
+use tracing::debug;
+
 use crate::MirBorrowckCtxt;
+use crate::diagnostics::{CapturedMessageOpt, DescribePlaceOpt, UseSpans};
+use crate::prefixes::PrefixSet;
+
+#[derive(Debug)]
+pub(crate) enum IllegalMoveOriginKind<'tcx> {
+    /// Illegal move due to attempt to move from behind a reference.
+    BorrowedContent {
+        /// The place the reference refers to: if erroneous code was trying to
+        /// move from `(*x).f` this will be `*x`.
+        target_place: Place<'tcx>,
+    },
+
+    /// Illegal move due to attempt to move from field of an ADT that
+    /// implements `Drop`. Rust maintains invariant that all `Drop`
+    /// ADT's remain fully-initialized so that user-defined destructor
+    /// can safely read from all of the ADT's fields.
+    InteriorOfTypeWithDestructor { container_ty: Ty<'tcx> },
+
+    /// Illegal move due to attempt to move out of a slice or array.
+    InteriorOfSliceOrArray { ty: Ty<'tcx>, is_index: bool },
+}
+
+#[derive(Debug)]
+pub(crate) struct MoveError<'tcx> {
+    place: Place<'tcx>,
+    location: Location,
+    kind: IllegalMoveOriginKind<'tcx>,
+}
+
+impl<'tcx> MoveError<'tcx> {
+    pub(crate) fn new(
+        place: Place<'tcx>,
+        location: Location,
+        kind: IllegalMoveOriginKind<'tcx>,
+    ) -> Self {
+        MoveError { place, location, kind }
+    }
+}
 
 // Often when desugaring a pattern match we may have many individual moves in
 // MIR that are all part of one operation from the user's point-of-view. For
@@ -54,21 +93,19 @@ enum GroupedMoveError<'tcx> {
     },
 }
 
-impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
-    pub(crate) fn report_move_errors(&mut self, move_errors: Vec<(Place<'tcx>, MoveError<'tcx>)>) {
-        let grouped_errors = self.group_move_errors(move_errors);
+impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
+    pub(crate) fn report_move_errors(&mut self) {
+        let grouped_errors = self.group_move_errors();
         for error in grouped_errors {
             self.report(error);
         }
     }
 
-    fn group_move_errors(
-        &self,
-        errors: Vec<(Place<'tcx>, MoveError<'tcx>)>,
-    ) -> Vec<GroupedMoveError<'tcx>> {
+    fn group_move_errors(&mut self) -> Vec<GroupedMoveError<'tcx>> {
         let mut grouped_errors = Vec::new();
-        for (original_path, error) in errors {
-            self.append_to_grouped_errors(&mut grouped_errors, original_path, error);
+        let errors = std::mem::take(&mut self.move_errors);
+        for error in errors {
+            self.append_to_grouped_errors(&mut grouped_errors, error);
         }
         grouped_errors
     }
@@ -76,68 +113,58 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     fn append_to_grouped_errors(
         &self,
         grouped_errors: &mut Vec<GroupedMoveError<'tcx>>,
-        original_path: Place<'tcx>,
         error: MoveError<'tcx>,
     ) {
-        match error {
-            MoveError::UnionMove { .. } => {
-                unimplemented!("don't know how to report union move errors yet.")
-            }
-            MoveError::IllegalMove { cannot_move_out_of: IllegalMoveOrigin { location, kind } } => {
-                // Note: that the only time we assign a place isn't a temporary
-                // to a user variable is when initializing it.
-                // If that ever stops being the case, then the ever initialized
-                // flow could be used.
-                if let Some(StatementKind::Assign(box (
-                    place,
-                    Rvalue::Use(Operand::Move(move_from)),
-                ))) = self.body.basic_blocks()[location.block]
-                    .statements
-                    .get(location.statement_index)
-                    .map(|stmt| &stmt.kind)
-                {
-                    if let Some(local) = place.as_local() {
-                        let local_decl = &self.body.local_decls[local];
-                        // opt_match_place is the
-                        // match_span is the span of the expression being matched on
-                        // match *x.y { ... }        match_place is Some(*x.y)
-                        //       ^^^^                match_span is the span of *x.y
-                        //
-                        // opt_match_place is None for let [mut] x = ... statements,
-                        // whether or not the right-hand side is a place expression
-                        if let Some(box LocalInfo::User(ClearCrossCrate::Set(BindingForm::Var(
-                            VarBindingForm {
-                                opt_match_place: Some((opt_match_place, match_span)),
-                                binding_mode: _,
-                                opt_ty_info: _,
-                                pat_span: _,
-                            },
-                        )))) = local_decl.local_info
-                        {
-                            let stmt_source_info = self.body.source_info(location);
-                            self.append_binding_error(
-                                grouped_errors,
-                                kind,
-                                original_path,
-                                *move_from,
-                                local,
-                                opt_match_place,
-                                match_span,
-                                stmt_source_info.span,
-                            );
-                            return;
-                        }
-                    }
-                }
+        let MoveError { place: original_path, location, kind } = error;
 
-                let move_spans = self.move_spans(original_path.as_ref(), location);
-                grouped_errors.push(GroupedMoveError::OtherIllegalMove {
-                    use_spans: move_spans,
-                    original_path,
-                    kind,
-                });
+        // Note: that the only time we assign a place isn't a temporary
+        // to a user variable is when initializing it.
+        // If that ever stops being the case, then the ever initialized
+        // flow could be used.
+        if let Some(StatementKind::Assign(box (place, Rvalue::Use(Operand::Move(move_from))))) =
+            self.body.basic_blocks[location.block]
+                .statements
+                .get(location.statement_index)
+                .map(|stmt| &stmt.kind)
+        {
+            if let Some(local) = place.as_local() {
+                let local_decl = &self.body.local_decls[local];
+                // opt_match_place is the
+                // match_span is the span of the expression being matched on
+                // match *x.y { ... }        match_place is Some(*x.y)
+                //       ^^^^                match_span is the span of *x.y
+                //
+                // opt_match_place is None for let [mut] x = ... statements,
+                // whether or not the right-hand side is a place expression
+                if let LocalInfo::User(BindingForm::Var(VarBindingForm {
+                    opt_match_place: Some((opt_match_place, match_span)),
+                    binding_mode: _,
+                    opt_ty_info: _,
+                    pat_span: _,
+                })) = *local_decl.local_info()
+                {
+                    let stmt_source_info = self.body.source_info(location);
+                    self.append_binding_error(
+                        grouped_errors,
+                        kind,
+                        original_path,
+                        *move_from,
+                        local,
+                        opt_match_place,
+                        match_span,
+                        stmt_source_info.span,
+                    );
+                    return;
+                }
             }
         }
+
+        let move_spans = self.move_spans(original_path.as_ref(), location);
+        grouped_errors.push(GroupedMoveError::OtherIllegalMove {
+            use_spans: move_spans,
+            original_path,
+            kind,
+        });
     }
 
     fn append_binding_error(
@@ -151,7 +178,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         match_span: Span,
         statement_span: Span,
     ) {
-        debug!("append_binding_error(match_place={:?}, match_span={:?})", match_place, match_span);
+        debug!(?match_place, ?match_span, "append_binding_error");
 
         let from_simple_let = match_place.is_none();
         let match_place = match_place.unwrap_or(move_from);
@@ -160,14 +187,14 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             // Error with the match place
             LookupResult::Parent(_) => {
                 for ge in &mut *grouped_errors {
-                    if let GroupedMoveError::MovesFromPlace { span, binds_to, .. } = ge {
-                        if match_span == *span {
-                            debug!("appending local({:?}) to list", bind_to);
-                            if !binds_to.is_empty() {
-                                binds_to.push(bind_to);
-                            }
-                            return;
+                    if let GroupedMoveError::MovesFromPlace { span, binds_to, .. } = ge
+                        && match_span == *span
+                    {
+                        debug!("appending local({bind_to:?}) to list");
+                        if !binds_to.is_empty() {
+                            binds_to.push(bind_to);
                         }
+                        return;
                     }
                 }
                 debug!("found a new move error location");
@@ -188,10 +215,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             }
             // Error with the pattern
             LookupResult::Exact(_) => {
-                let mpi = match self.move_data.rev_lookup.find(move_from.as_ref()) {
-                    LookupResult::Parent(Some(mpi)) => mpi,
+                let LookupResult::Parent(Some(mpi)) =
+                    self.move_data.rev_lookup.find(move_from.as_ref())
+                else {
                     // move_from should be a projection from match_place.
-                    _ => unreachable!("Probably not unreachable..."),
+                    unreachable!("Probably not unreachable...");
                 };
                 for ge in &mut *grouped_errors {
                     if let GroupedMoveError::MovesFromValue {
@@ -202,7 +230,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     } = ge
                     {
                         if match_span == *span && mpi == *other_mpi {
-                            debug!("appending local({:?}) to list", bind_to);
+                            debug!("appending local({bind_to:?}) to list");
                             binds_to.push(bind_to);
                             return;
                         }
@@ -222,12 +250,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
     fn report(&mut self, error: GroupedMoveError<'tcx>) {
         let (mut err, err_span) = {
-            let (span, use_spans, original_path, kind): (
-                Span,
-                Option<UseSpans<'tcx>>,
-                Place<'tcx>,
-                &IllegalMoveOriginKind<'_>,
-            ) = match error {
+            let (span, use_spans, original_path, kind) = match error {
                 GroupedMoveError::MovesFromPlace { span, original_path, ref kind, .. }
                 | GroupedMoveError::MovesFromValue { span, original_path, ref kind, .. } => {
                     (span, None, original_path, kind)
@@ -268,11 +291,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         self.buffer_error(err);
     }
 
-    fn report_cannot_move_from_static(
-        &mut self,
-        place: Place<'tcx>,
-        span: Span,
-    ) -> DiagnosticBuilder<'a> {
+    fn report_cannot_move_from_static(&mut self, place: Place<'tcx>, span: Span) -> Diag<'infcx> {
         let description = if place.projection.len() == 1 {
             format!("static item {}", self.describe_any_place(place.as_ref()))
         } else {
@@ -288,24 +307,140 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         self.cannot_move_out_of(span, &description)
     }
 
+    fn suggest_clone_of_captured_var_in_move_closure(
+        &self,
+        err: &mut Diag<'_>,
+        upvar_hir_id: HirId,
+        upvar_name: &str,
+        use_spans: Option<UseSpans<'tcx>>,
+    ) {
+        let tcx = self.infcx.tcx;
+        let typeck_results = tcx.typeck(self.mir_def_id());
+        let Some(use_spans) = use_spans else { return };
+        // We only care about the case where a closure captured a binding.
+        let UseSpans::ClosureUse { args_span, .. } = use_spans else { return };
+        let Some(body_id) = tcx.hir_node(self.mir_hir_id()).body_id() else { return };
+        // Fetch the type of the expression corresponding to the closure-captured binding.
+        let Some(captured_ty) = typeck_results.node_type_opt(upvar_hir_id) else { return };
+        if !self.implements_clone(captured_ty) {
+            // We only suggest cloning the captured binding if the type can actually be cloned.
+            return;
+        };
+        // Find the closure that captured the binding.
+        let mut expr_finder = FindExprBySpan::new(args_span, tcx);
+        expr_finder.include_closures = true;
+        expr_finder.visit_expr(tcx.hir().body(body_id).value);
+        let Some(closure_expr) = expr_finder.result else { return };
+        let ExprKind::Closure(closure) = closure_expr.kind else { return };
+        // We'll only suggest cloning the binding if it's a `move` closure.
+        let CaptureBy::Value { .. } = closure.capture_clause else { return };
+        // Find the expression within the closure where the binding is consumed.
+        let mut suggested = false;
+        let use_span = use_spans.var_or_use();
+        let mut expr_finder = FindExprBySpan::new(use_span, tcx);
+        expr_finder.include_closures = true;
+        expr_finder.visit_expr(tcx.hir().body(body_id).value);
+        let Some(use_expr) = expr_finder.result else { return };
+        let parent = tcx.parent_hir_node(use_expr.hir_id);
+        if let Node::Expr(expr) = parent
+            && let ExprKind::Assign(lhs, ..) = expr.kind
+            && lhs.hir_id == use_expr.hir_id
+        {
+            // Cloning the value being assigned makes no sense:
+            //
+            // error[E0507]: cannot move out of `var`, a captured variable in an `FnMut` closure
+            //   --> $DIR/option-content-move2.rs:11:9
+            //    |
+            // LL |     let mut var = None;
+            //    |         ------- captured outer variable
+            // LL |     func(|| {
+            //    |          -- captured by this `FnMut` closure
+            // LL |         // Shouldn't suggest `move ||.as_ref()` here
+            // LL |         move || {
+            //    |         ^^^^^^^ `var` is moved here
+            // LL |
+            // LL |             var = Some(NotCopyable);
+            //    |             ---
+            //    |             |
+            //    |             variable moved due to use in closure
+            //    |             move occurs because `var` has type `Option<NotCopyable>`, which does not implement the `Copy` trait
+            //    |
+            return;
+        }
+
+        // Search for an appropriate place for the structured `.clone()` suggestion to be applied.
+        // If we encounter a statement before the borrow error, we insert a statement there.
+        for (_, node) in tcx.hir().parent_iter(closure_expr.hir_id) {
+            if let Node::Stmt(stmt) = node {
+                let padding = tcx
+                    .sess
+                    .source_map()
+                    .indentation_before(stmt.span)
+                    .unwrap_or_else(|| "    ".to_string());
+                err.multipart_suggestion_verbose(
+                    "clone the value before moving it into the closure",
+                    vec![
+                        (
+                            stmt.span.shrink_to_lo(),
+                            format!("let value = {upvar_name}.clone();\n{padding}"),
+                        ),
+                        (use_span, "value".to_string()),
+                    ],
+                    Applicability::MachineApplicable,
+                );
+                suggested = true;
+                break;
+            } else if let Node::Expr(expr) = node
+                && let ExprKind::Closure(_) = expr.kind
+            {
+                // We want to suggest cloning only on the first closure, not
+                // subsequent ones (like `ui/suggestions/option-content-move2.rs`).
+                break;
+            }
+        }
+        if !suggested {
+            // If we couldn't find a statement for us to insert a new `.clone()` statement before,
+            // we have a bare expression, so we suggest the creation of a new block inline to go
+            // from `move || val` to `{ let value = val.clone(); move || value }`.
+            let padding = tcx
+                .sess
+                .source_map()
+                .indentation_before(closure_expr.span)
+                .unwrap_or_else(|| "    ".to_string());
+            err.multipart_suggestion_verbose(
+                "clone the value before moving it into the closure",
+                vec![
+                    (
+                        closure_expr.span.shrink_to_lo(),
+                        format!("{{\n{padding}let value = {upvar_name}.clone();\n{padding}"),
+                    ),
+                    (use_spans.var_or_use(), "value".to_string()),
+                    (closure_expr.span.shrink_to_hi(), format!("\n{padding}}}")),
+                ],
+                Applicability::MachineApplicable,
+            );
+        }
+    }
+
     fn report_cannot_move_from_borrowed_content(
         &mut self,
         move_place: Place<'tcx>,
         deref_target_place: Place<'tcx>,
         span: Span,
         use_spans: Option<UseSpans<'tcx>>,
-    ) -> DiagnosticBuilder<'a> {
+    ) -> Diag<'infcx> {
+        let tcx = self.infcx.tcx;
         // Inspect the type of the content behind the
         // borrow to provide feedback about why this
         // was a move rather than a copy.
-        let ty = deref_target_place.ty(self.body, self.infcx.tcx).ty;
+        let ty = deref_target_place.ty(self.body, tcx).ty;
         let upvar_field = self
             .prefixes(move_place.as_ref(), PrefixSet::All)
             .find_map(|p| self.is_upvar_field_projection(p));
 
         let deref_base = match deref_target_place.projection.as_ref() {
             [proj_base @ .., ProjectionElem::Deref] => {
-                PlaceRef { local: deref_target_place.local, projection: &proj_base }
+                PlaceRef { local: deref_target_place.local, projection: proj_base }
             }
             _ => bug!("deref_target_place is not a deref projection"),
         };
@@ -313,15 +448,15 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         if let PlaceRef { local, projection: [] } = deref_base {
             let decl = &self.body.local_decls[local];
             if decl.is_ref_for_guard() {
-                let mut err = self.cannot_move_out_of(
-                    span,
-                    &format!("`{}` in pattern guard", self.local_names[local].unwrap()),
-                );
-                err.note(
-                    "variables bound in patterns cannot be moved from \
-                     until after the end of the pattern guard",
-                );
-                return err;
+                return self
+                    .cannot_move_out_of(
+                        span,
+                        &format!("`{}` in pattern guard", self.local_names[local].unwrap()),
+                    )
+                    .with_note(
+                        "variables bound in patterns cannot be moved from \
+                         until after the end of the pattern guard",
+                    );
             } else if decl.is_ref_to_static() {
                 return self.report_cannot_move_from_static(move_place, span);
             }
@@ -332,10 +467,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             ty::Array(..) | ty::Slice(..) => {
                 self.cannot_move_out_of_interior_noncopy(span, ty, None)
             }
-            ty::Closure(def_id, closure_substs)
+            ty::Closure(def_id, closure_args)
                 if def_id.as_local() == Some(self.mir_def_id()) && upvar_field.is_some() =>
             {
-                let closure_kind_ty = closure_substs.as_closure().kind_ty();
+                let closure_kind_ty = closure_args.as_closure().kind_ty();
                 let closure_kind = match closure_kind_ty.to_opt_closure_kind() {
                     Some(kind @ (ty::ClosureKind::Fn | ty::ClosureKind::FnMut)) => kind,
                     Some(ty::ClosureKind::FnOnce) => {
@@ -344,20 +479,20 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     None => bug!("closure kind not inferred by borrowck"),
                 };
                 let capture_description =
-                    format!("captured variable in an `{}` closure", closure_kind);
+                    format!("captured variable in an `{closure_kind}` closure");
 
                 let upvar = &self.upvars[upvar_field.unwrap().index()];
-                let upvar_hir_id = upvar.place.get_root_variable();
-                let upvar_name = upvar.place.to_string(self.infcx.tcx);
-                let upvar_span = self.infcx.tcx.hir().span(upvar_hir_id);
+                let upvar_hir_id = upvar.get_root_variable();
+                let upvar_name = upvar.to_string(tcx);
+                let upvar_span = tcx.hir().span(upvar_hir_id);
 
                 let place_name = self.describe_any_place(move_place.as_ref());
 
                 let place_description =
                     if self.is_upvar_field_projection(move_place.as_ref()).is_some() {
-                        format!("{}, a {}", place_name, capture_description)
+                        format!("{place_name}, a {capture_description}")
                     } else {
-                        format!("{}, as `{}` is a {}", place_name, upvar_name, capture_description)
+                        format!("{place_name}, as `{upvar_name}` is a {capture_description}")
                     };
 
                 debug!(
@@ -365,114 +500,90 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     closure_kind_ty, closure_kind, place_description,
                 );
 
-                let mut diag = self.cannot_move_out_of(span, &place_description);
-
-                diag.span_label(upvar_span, "captured outer variable");
-                diag.span_label(
-                    self.body.span,
-                    format!("captured by this `{}` closure", closure_kind),
+                let closure_span = tcx.def_span(def_id);
+                let mut err = self
+                    .cannot_move_out_of(span, &place_description)
+                    .with_span_label(upvar_span, "captured outer variable")
+                    .with_span_label(
+                        closure_span,
+                        format!("captured by this `{closure_kind}` closure"),
+                    );
+                self.suggest_clone_of_captured_var_in_move_closure(
+                    &mut err,
+                    upvar_hir_id,
+                    &upvar_name,
+                    use_spans,
                 );
-
-                diag
+                err
             }
             _ => {
                 let source = self.borrowed_content_source(deref_base);
-                match (self.describe_place(move_place.as_ref()), source.describe_for_named_place())
-                {
-                    (Some(place_desc), Some(source_desc)) => self.cannot_move_out_of(
-                        span,
-                        &format!("`{}` which is behind a {}", place_desc, source_desc),
+                let move_place_ref = move_place.as_ref();
+                match (
+                    self.describe_place_with_options(
+                        move_place_ref,
+                        DescribePlaceOpt {
+                            including_downcast: false,
+                            including_tuple_field: false,
+                        },
                     ),
-                    (_, _) => self.cannot_move_out_of(
+                    self.describe_name(move_place_ref),
+                    source.describe_for_named_place(),
+                ) {
+                    (Some(place_desc), Some(name), Some(source_desc)) => self.cannot_move_out_of(
                         span,
-                        &source.describe_for_unnamed_place(self.infcx.tcx),
+                        &format!("`{place_desc}` as enum variant `{name}` which is behind a {source_desc}"),
+                    ),
+                    (Some(place_desc), Some(name), None) => self.cannot_move_out_of(
+                        span,
+                        &format!("`{place_desc}` as enum variant `{name}`"),
+                    ),
+                    (Some(place_desc), _, Some(source_desc)) => self.cannot_move_out_of(
+                        span,
+                        &format!("`{place_desc}` which is behind a {source_desc}"),
+                    ),
+                    (_, _, _) => self.cannot_move_out_of(
+                        span,
+                        &source.describe_for_unnamed_place(tcx),
                     ),
                 }
             }
         };
-        let ty = move_place.ty(self.body, self.infcx.tcx).ty;
-        let def_id = match *ty.kind() {
-            ty::Adt(self_def, _) => self_def.did,
-            ty::Foreign(def_id)
-            | ty::FnDef(def_id, _)
-            | ty::Closure(def_id, _)
-            | ty::Generator(def_id, ..)
-            | ty::Opaque(def_id, _) => def_id,
-            _ => return err,
+        let msg_opt = CapturedMessageOpt {
+            is_partial_move: false,
+            is_loop_message: false,
+            is_move_msg: false,
+            is_loop_move: false,
+            has_suggest_reborrow: false,
+            maybe_reinitialized_locations_is_empty: true,
         };
-        let diag_name = self.infcx.tcx.get_diagnostic_name(def_id);
-        if matches!(diag_name, Some(sym::Option | sym::Result))
-            && use_spans.map_or(true, |v| !v.for_closure())
-        {
-            err.span_suggestion_verbose(
-                span.shrink_to_hi(),
-                &format!("consider borrowing the `{}`'s content", diag_name.unwrap()),
-                ".as_ref()".to_string(),
-                Applicability::MaybeIncorrect,
-            );
-        } else if let Some(UseSpans::FnSelfUse {
-            kind:
-                CallKind::Normal { desugaring: Some((CallDesugaringKind::ForLoopIntoIter, _)), .. },
-            ..
-        }) = use_spans
-        {
-            let suggest = match self.infcx.tcx.get_diagnostic_item(sym::IntoIterator) {
-                Some(def_id) => self.infcx.tcx.infer_ctxt().enter(|infcx| {
-                    type_known_to_meet_bound_modulo_regions(
-                        &infcx,
-                        self.param_env,
-                        infcx
-                            .tcx
-                            .mk_imm_ref(infcx.tcx.lifetimes.re_erased, infcx.tcx.erase_regions(ty)),
-                        def_id,
-                        DUMMY_SP,
-                    )
-                }),
-                _ => false,
-            };
-            if suggest {
-                err.span_suggestion_verbose(
-                    span.shrink_to_lo(),
-                    &format!("consider iterating over a slice of the `{}`'s content", ty),
-                    "&".to_string(),
-                    Applicability::MaybeIncorrect,
-                );
-            }
+        if let Some(use_spans) = use_spans {
+            self.explain_captures(&mut err, span, span, use_spans, move_place, msg_opt);
         }
         err
     }
 
-    fn add_move_hints(
-        &self,
-        error: GroupedMoveError<'tcx>,
-        err: &mut DiagnosticBuilder<'a>,
-        span: Span,
-    ) {
+    fn add_move_hints(&self, error: GroupedMoveError<'tcx>, err: &mut Diag<'_>, span: Span) {
         match error {
             GroupedMoveError::MovesFromPlace { mut binds_to, move_from, .. } => {
-                if let Ok(snippet) = self.infcx.tcx.sess.source_map().span_to_snippet(span) {
-                    err.span_suggestion(
-                        span,
-                        "consider borrowing here",
-                        format!("&{}", snippet),
-                        Applicability::Unspecified,
-                    );
-                }
-
+                self.add_borrow_suggestions(err, span);
                 if binds_to.is_empty() {
                     let place_ty = move_from.ty(self.body, self.infcx.tcx).ty;
                     let place_desc = match self.describe_place(move_from.as_ref()) {
-                        Some(desc) => format!("`{}`", desc),
+                        Some(desc) => format!("`{desc}`"),
                         None => "value".to_string(),
                     };
 
-                    self.note_type_does_not_implement_copy(
-                        err,
-                        &place_desc,
-                        place_ty,
-                        Some(span),
-                        "",
-                    );
+                    if let Some(expr) = self.find_expr(span) {
+                        self.suggest_cloning(err, place_ty, expr, None);
+                    }
+
+                    err.subdiagnostic(crate::session_diagnostics::TypeNoCopy::Label {
+                        is_partial_move: false,
+                        ty: place_ty,
+                        place: &place_desc,
+                        span,
+                    });
                 } else {
                     binds_to.sort();
                     binds_to.dedup();
@@ -488,61 +599,125 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             }
             // No binding. Nothing to suggest.
             GroupedMoveError::OtherIllegalMove { ref original_path, use_spans, .. } => {
-                let span = use_spans.var_or_use();
+                let use_span = use_spans.var_or_use();
                 let place_ty = original_path.ty(self.body, self.infcx.tcx).ty;
                 let place_desc = match self.describe_place(original_path.as_ref()) {
-                    Some(desc) => format!("`{}`", desc),
+                    Some(desc) => format!("`{desc}`"),
                     None => "value".to_string(),
                 };
-                self.note_type_does_not_implement_copy(err, &place_desc, place_ty, Some(span), "");
 
-                use_spans.args_span_label(err, format!("move out of {} occurs here", place_desc));
-                use_spans.var_span_label(
-                    err,
-                    format!("move occurs due to use{}", use_spans.describe()),
-                    "moved",
+                if let Some(expr) = self.find_expr(use_span) {
+                    self.suggest_cloning(err, place_ty, expr, Some(use_spans));
+                }
+
+                err.subdiagnostic(crate::session_diagnostics::TypeNoCopy::Label {
+                    is_partial_move: false,
+                    ty: place_ty,
+                    place: &place_desc,
+                    span: use_span,
+                });
+
+                use_spans.args_subdiag(err, |args_span| {
+                    crate::session_diagnostics::CaptureArgLabel::MoveOutPlace {
+                        place: place_desc,
+                        args_span,
+                    }
+                });
+
+                self.add_note_for_packed_struct_derive(err, original_path.local);
+            }
+        }
+    }
+
+    fn add_borrow_suggestions(&self, err: &mut Diag<'_>, span: Span) {
+        match self.infcx.tcx.sess.source_map().span_to_snippet(span) {
+            Ok(snippet) if snippet.starts_with('*') => {
+                let sp = span.with_lo(span.lo() + BytePos(1));
+                let inner = self.find_expr(sp);
+                let mut is_raw_ptr = false;
+                if let Some(inner) = inner {
+                    let typck_result = self.infcx.tcx.typeck(self.mir_def_id());
+                    if let Some(inner_type) = typck_result.node_type_opt(inner.hir_id) {
+                        if matches!(inner_type.kind(), ty::RawPtr(..)) {
+                            is_raw_ptr = true;
+                        }
+                    }
+                }
+                // If the `inner` is a raw pointer, do not suggest removing the "*", see #126863
+                // FIXME: need to check whether the assigned object can be a raw pointer, see `tests/ui/borrowck/issue-20801.rs`.
+                if !is_raw_ptr {
+                    err.span_suggestion_verbose(
+                        span.with_hi(span.lo() + BytePos(1)),
+                        "consider removing the dereference here",
+                        String::new(),
+                        Applicability::MaybeIncorrect,
+                    );
+                }
+            }
+            _ => {
+                err.span_suggestion_verbose(
+                    span.shrink_to_lo(),
+                    "consider borrowing here",
+                    '&',
+                    Applicability::MaybeIncorrect,
                 );
             }
         }
     }
 
-    fn add_move_error_suggestions(&self, err: &mut DiagnosticBuilder<'a>, binds_to: &[Local]) {
-        let mut suggestions: Vec<(Span, &str, String)> = Vec::new();
+    fn add_move_error_suggestions(&self, err: &mut Diag<'_>, binds_to: &[Local]) {
+        let mut suggestions: Vec<(Span, String, String)> = Vec::new();
         for local in binds_to {
             let bind_to = &self.body.local_decls[*local];
-            if let Some(box LocalInfo::User(ClearCrossCrate::Set(BindingForm::Var(
-                VarBindingForm { pat_span, .. },
-            )))) = bind_to.local_info
+            if let LocalInfo::User(BindingForm::Var(VarBindingForm { pat_span, .. })) =
+                *bind_to.local_info()
             {
-                if let Ok(pat_snippet) = self.infcx.tcx.sess.source_map().span_to_snippet(pat_span)
+                let Ok(pat_snippet) = self.infcx.tcx.sess.source_map().span_to_snippet(pat_span)
+                else {
+                    continue;
+                };
+                let Some(stripped) = pat_snippet.strip_prefix('&') else {
+                    suggestions.push((
+                        bind_to.source_info.span.shrink_to_lo(),
+                        "consider borrowing the pattern binding".to_string(),
+                        "ref ".to_string(),
+                    ));
+                    continue;
+                };
+                let inner_pat_snippet = stripped.trim_start();
+                let (pat_span, suggestion, to_remove) = if inner_pat_snippet.starts_with("mut")
+                    && inner_pat_snippet["mut".len()..].starts_with(rustc_lexer::is_whitespace)
                 {
-                    if let Some(stripped) = pat_snippet.strip_prefix('&') {
-                        let pat_snippet = stripped.trim_start();
-                        let (suggestion, to_remove) = if pat_snippet.starts_with("mut")
-                            && pat_snippet["mut".len()..].starts_with(rustc_lexer::is_whitespace)
-                        {
-                            (pat_snippet["mut".len()..].trim_start(), "&mut")
-                        } else {
-                            (pat_snippet, "&")
-                        };
-                        suggestions.push((pat_span, to_remove, suggestion.to_owned()));
-                    }
-                }
+                    let inner_pat_snippet = inner_pat_snippet["mut".len()..].trim_start();
+                    let pat_span = pat_span.with_hi(
+                        pat_span.lo()
+                            + BytePos((pat_snippet.len() - inner_pat_snippet.len()) as u32),
+                    );
+                    (pat_span, String::new(), "mutable borrow")
+                } else {
+                    let pat_span = pat_span.with_hi(
+                        pat_span.lo()
+                            + BytePos(
+                                (pat_snippet.len() - inner_pat_snippet.trim_start().len()) as u32,
+                            ),
+                    );
+                    (pat_span, String::new(), "borrow")
+                };
+                suggestions.push((
+                    pat_span,
+                    format!("consider removing the {to_remove}"),
+                    suggestion,
+                ));
             }
         }
         suggestions.sort_unstable_by_key(|&(span, _, _)| span);
         suggestions.dedup_by_key(|&mut (span, _, _)| span);
-        for (span, to_remove, suggestion) in suggestions {
-            err.span_suggestion(
-                span,
-                &format!("consider removing the `{}`", to_remove),
-                suggestion,
-                Applicability::MachineApplicable,
-            );
+        for (span, msg, suggestion) in suggestions {
+            err.span_suggestion_verbose(span, msg, suggestion, Applicability::MachineApplicable);
         }
     }
 
-    fn add_move_error_details(&self, err: &mut DiagnosticBuilder<'a>, binds_to: &[Local]) {
+    fn add_move_error_details(&self, err: &mut Diag<'_>, binds_to: &[Local]) {
         for (j, local) in binds_to.iter().enumerate() {
             let bind_to = &self.body.local_decls[*local];
             let binding_span = bind_to.source_info.span;
@@ -554,21 +729,43 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             }
 
             if binds_to.len() == 1 {
-                self.note_type_does_not_implement_copy(
-                    err,
-                    &format!("`{}`", self.local_names[*local].unwrap()),
-                    bind_to.ty,
-                    Some(binding_span),
-                    "",
-                );
+                let place_desc = &format!("`{}`", self.local_names[*local].unwrap());
+
+                if let Some(expr) = self.find_expr(binding_span) {
+                    self.suggest_cloning(err, bind_to.ty, expr, None);
+                }
+
+                err.subdiagnostic(crate::session_diagnostics::TypeNoCopy::Label {
+                    is_partial_move: false,
+                    ty: bind_to.ty,
+                    place: place_desc,
+                    span: binding_span,
+                });
             }
         }
 
         if binds_to.len() > 1 {
             err.note(
-                "move occurs because these variables have types that \
-                      don't implement the `Copy` trait",
+                "move occurs because these variables have types that don't implement the `Copy` \
+                 trait",
             );
+        }
+    }
+
+    /// Adds an explanatory note if the move error occurs in a derive macro
+    /// expansion of a packed struct.
+    /// Such errors happen because derive macro expansions shy away from taking
+    /// references to the struct's fields since doing so would be undefined behaviour
+    fn add_note_for_packed_struct_derive(&self, err: &mut Diag<'_>, local: Local) {
+        let local_place: PlaceRef<'tcx> = local.into();
+        let local_ty = local_place.ty(self.body.local_decls(), self.infcx.tcx).ty.peel_refs();
+
+        if let Some(adt) = local_ty.ty_adt_def()
+            && adt.repr().packed()
+            && let ExpnKind::Macro(MacroKind::Derive, name) =
+                self.body.span.ctxt().outer_expn_data().kind
+        {
+            err.note(format!("`#[derive({name})]` triggers a move because taking references to the fields of a packed struct is undefined behaviour"));
         }
     }
 }

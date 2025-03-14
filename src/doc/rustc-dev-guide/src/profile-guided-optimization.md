@@ -49,7 +49,7 @@ workflow to see how they interact.
 
 [^note-instrument-coverage]: Note: `rustc` now supports front-end-based coverage
 instrumentation, via the experimental option
-[`-Z instrument-coverage`](./llvm-coverage-instrumentation.md), but using these
+[`-C instrument-coverage`](./llvm-coverage-instrumentation.md), but using these
 coverage results for PGO has not been attempted at this time.
 
 ### Overall Workflow
@@ -131,10 +131,11 @@ in [run-make tests][rmake-tests] (the relevant tests have `pgo` in their name).
 There is also a [codegen test][codegen-test] that checks that some expected
 instrumentation artifacts show up in LLVM IR.
 
-[rmake-tests]: https://github.com/rust-lang/rust/tree/master/src/test/run-make-fulldeps
-[codegen-test]: https://github.com/rust-lang/rust/blob/master/src/test/codegen/pgo-instrumentation.rs
+[rmake-tests]: https://github.com/rust-lang/rust/tree/master/tests/run-make
+[codegen-test]: https://github.com/rust-lang/rust/blob/master/tests/codegen/pgo-instrumentation.rs
 
 ## Additional Information
 
-Clang's documentation contains a good overview on PGO in LLVM here:
-https://clang.llvm.org/docs/UsersManual.html#profile-guided-optimization
+Clang's documentation contains a good overview on [PGO in LLVM][llvm-pgo].
+
+[llvm-pgo]: https://clang.llvm.org/docs/UsersManual.html#profile-guided-optimization

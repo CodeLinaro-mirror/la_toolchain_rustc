@@ -26,7 +26,45 @@ Every night at 00:00 UTC, the artifacts from the most recently merged PR are
 promoted to the nightly release channel. A similar process happens for beta
 and stable releases.
 
-[`dist` bootstrap module]: https://github.com/rust-lang/rust/blob/master/src/bootstrap/dist.rs
+[`dist` bootstrap module]: https://github.com/rust-lang/rust/blob/master/src/bootstrap/src/core/build_steps/dist.rs
+
+## Submodule updates
+
+Cargo is tracked in the [rust-lang/rust] repository using a [git submodule].
+It is updated manually about once a week by a Cargo team member.
+However, anyone is welcome to update it as needed.
+
+[@ehuss] has a tool called [subup](https://github.com/ehuss/subup) to automate the process of updating the submodule, updating the lockfile, running tests, and creating a PR.
+Running the tests ahead-of-time helps avoid long cycle times waiting for bors if there are any errors.
+Subup will also provide a message to include in the PR with a list of all PRs it covers.
+Posting this in the PR message also helps create reference links on each Cargo PR to the submodule update PR to help track when it gets merged.
+
+The following is an example of the command to run in a local clone of rust-lang/rust to run a certain set of tests of things that are likely to get broken by a Cargo update:
+
+```bash
+subup --up-branch update-cargo \
+    --commit-message "Update cargo" \
+    --test="src/tools/linkchecker tidy \
+        src/tools/cargo \
+        src/tools/rustfmt" \
+    src/tools/cargo
+```
+
+If doing a [beta backport](#beta-backports), the command is similar, but needs to point to the correct branches:
+
+```bash
+subup --up-branch update-beta-cargo \
+    --rust-branch beta \
+    --set-config rust.channel=beta \
+    --commit-message "[beta] Update cargo" \
+    --test="src/tools/linkchecker tidy \
+        src/tools/cargo \
+        src/tools/rustfmt" \
+    rust-1.66.0:src/tools/cargo
+```
+
+[@ehuss]: https://github.com/ehuss/
+[git submodule]: https://git-scm.com/book/en/v2/Git-Tools-Submodules
 
 ## Version updates
 
@@ -53,6 +91,23 @@ release**. It is rare that these get updated. Bumping these as-needed helps
 avoid churning incompatible version numbers. This process should be improved
 in the future!
 
+[@ehuss] has a tool called [cargo-new-release] to automate the process of doing a version bump.
+It runs through several steps:
+1. Creates a branch
+2. Updates the version numbers
+3. Creates a changelog for anything on the master branch that is not part of beta
+4. Creates a changelog for anything on the beta branch
+
+It opens a browser tab for every PR in order to review each change.
+It places each PR in the changelog with its title, but usually every PR should be rewritten to explain the change from the user's perspective.
+Each PR should also be categorized as an Addition, Change, Fix, or Nightly-only change.
+Most PRs are deleted, since they are not relevant to users of Cargo.
+For example, remove all PRs related to Cargo internals, infrastructure, documentation, error changes, refactorings, etc.
+Usually about half of the PRs get removed.
+This process usually takes @ehuss about an hour to finish.
+
+[@ehuss]: https://github.com/ehuss/
+[cargo-new-release]: https://github.com/ehuss/cargo-new-release
 [`crates/` directory]: https://github.com/rust-lang/cargo/tree/master/crates
 
 ## Docs publishing
@@ -68,15 +123,41 @@ stable) and the release-specific URL such as
 The code that builds the documentation is located in the [`doc` bootstrap
 module].
 
-[`doc` bootstrap module]: https://github.com/rust-lang/rust/blob/master/src/bootstrap/doc.rs
+[`doc` bootstrap module]: https://github.com/rust-lang/rust/blob/master/src/bootstrap/src/core/build_steps/doc.rs
 
 ## crates.io publishing
 
-Cargo's library is published to [crates.io] as part of the stable release
-process. This is handled by the [Release team] as part of their process. There
-is a [`publish.py` script] that in theory should help with this process. The
-test and build tool crates aren't published.
+Cargo's library and its related dependencies (like `cargo-util`) are published
+to [crates.io] as part of the 6-week stable release process by the [Release
+team]. The release process involves a series of steps:
 
+1. The Release team's automation scripts (see <https://github.com/rust-lang/simpleinfra/>) will run [`promote-release`] which will create a tag in the `rust-lang/cargo` repository associated with the version of the cargo submodule for that release.
+2. The creation of a tag will trigger the [release workflow] in `rust-lang/cargo`.
+3. The release workflow will run the [`publish.py` script] on the commit associated with the tag.
+4. The `publish.py` script will run `cargo publish` on any crates that are not already published.
+
+[`promote-release`]: https://github.com/rust-lang/promote-release
+[release workflow]: https://github.com/rust-lang/cargo/blob/master/.github/workflows/release.yml
+
+On very rare cases, the Cargo team may decide to manually publish a new
+release to [crates.io]. For example, this may be necessary if there is a
+problem with the current version that only affects API users, and does not
+affect the `cargo` binary shipped in the stable release. In this situation,
+PRs should be merged to the associated stable release branch in the cargo repo
+(like `rust-1.70.0`) that fix the issue and bump the patch version of the
+affected package. Then you need to work with the Release Team to get a release
+published to crates.io.[^release-problem]
+
+Some packages are not published automatically because they are not part of the
+Rust release train. This currently only includes the [`home`] package. These
+are published manually on an as-needed or as-requested basis by whoever has
+permissions (currently [@ehuss] or the Release/Infra team)[^fix-manual-release].
+
+[^release-problem]: Unfortunately there are some complications with this process. See <https://github.com/rust-lang/cargo/issues/14538> for more detail, and thoughts on how to improve this.
+
+[^fix-manual-release]: This should be fixed, see [crate ownership policy](https://forge.rust-lang.org/policies/crate-ownership.html) about removing ownership. Also see <https://github.com/rust-lang/cargo/issues/14538> for problems with tagging. In general, these should be published from GitHub Actions, but we don't have the infrastructure set up for that, yet.
+
+[`home`]: https://github.com/rust-lang/cargo/tree/master/crates/home
 [`publish.py` script]: https://github.com/rust-lang/cargo/blob/master/publish.py
 
 ## Beta backports

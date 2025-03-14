@@ -1,4 +1,4 @@
-//! Constants specific to the `f32` single-precision floating point type.
+//! Constants for the `f32` single-precision floating point type.
 //!
 //! *[See also the `f32` primitive type](primitive@f32).*
 //!
@@ -15,22 +15,23 @@
 #[cfg(test)]
 mod tests;
 
+#[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated, deprecated_in_future)]
+pub use core::f32::{
+    DIGITS, EPSILON, INFINITY, MANTISSA_DIGITS, MAX, MAX_10_EXP, MAX_EXP, MIN, MIN_10_EXP, MIN_EXP,
+    MIN_POSITIVE, NAN, NEG_INFINITY, RADIX, consts,
+};
+
 #[cfg(not(test))]
 use crate::intrinsics;
 #[cfg(not(test))]
 use crate::sys::cmath;
 
-#[stable(feature = "rust1", since = "1.0.0")]
-#[allow(deprecated, deprecated_in_future)]
-pub use core::f32::{
-    consts, DIGITS, EPSILON, INFINITY, MANTISSA_DIGITS, MAX, MAX_10_EXP, MAX_EXP, MIN, MIN_10_EXP,
-    MIN_EXP, MIN_POSITIVE, NAN, NEG_INFINITY, RADIX,
-};
-
 #[cfg(not(test))]
-#[lang = "f32_runtime"]
 impl f32 {
-    /// Returns the largest integer less than or equal to a number.
+    /// Returns the largest integer less than or equal to `self`.
+    ///
+    /// This function always returns the precise result.
     ///
     /// # Examples
     ///
@@ -43,6 +44,7 @@ impl f32 {
     /// assert_eq!(g.floor(), 3.0);
     /// assert_eq!(h.floor(), -4.0);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -50,7 +52,9 @@ impl f32 {
         unsafe { intrinsics::floorf32(self) }
     }
 
-    /// Returns the smallest integer greater than or equal to a number.
+    /// Returns the smallest integer greater than or equal to `self`.
+    ///
+    /// This function always returns the precise result.
     ///
     /// # Examples
     ///
@@ -61,6 +65,8 @@ impl f32 {
     /// assert_eq!(f.ceil(), 4.0);
     /// assert_eq!(g.ceil(), 4.0);
     /// ```
+    #[doc(alias = "ceiling")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -68,18 +74,27 @@ impl f32 {
         unsafe { intrinsics::ceilf32(self) }
     }
 
-    /// Returns the nearest integer to a number. Round half-way cases away from
-    /// `0.0`.
+    /// Returns the nearest integer to `self`. If a value is half-way between two
+    /// integers, round away from `0.0`.
+    ///
+    /// This function always returns the precise result.
     ///
     /// # Examples
     ///
     /// ```
     /// let f = 3.3_f32;
     /// let g = -3.3_f32;
+    /// let h = -3.7_f32;
+    /// let i = 3.5_f32;
+    /// let j = 4.5_f32;
     ///
     /// assert_eq!(f.round(), 3.0);
     /// assert_eq!(g.round(), -3.0);
+    /// assert_eq!(h.round(), -4.0);
+    /// assert_eq!(i.round(), 4.0);
+    /// assert_eq!(j.round(), 5.0);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -87,7 +102,36 @@ impl f32 {
         unsafe { intrinsics::roundf32(self) }
     }
 
-    /// Returns the integer part of a number.
+    /// Returns the nearest integer to a number. Rounds half-way cases to the number
+    /// with an even least significant digit.
+    ///
+    /// This function always returns the precise result.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let f = 3.3_f32;
+    /// let g = -3.3_f32;
+    /// let h = 3.5_f32;
+    /// let i = 4.5_f32;
+    ///
+    /// assert_eq!(f.round_ties_even(), 3.0);
+    /// assert_eq!(g.round_ties_even(), -3.0);
+    /// assert_eq!(h.round_ties_even(), 4.0);
+    /// assert_eq!(i.round_ties_even(), 4.0);
+    /// ```
+    #[rustc_allow_incoherent_impl]
+    #[must_use = "method returns a new number and does not mutate the original value"]
+    #[stable(feature = "round_ties_even", since = "1.77.0")]
+    #[inline]
+    pub fn round_ties_even(self) -> f32 {
+        unsafe { intrinsics::rintf32(self) }
+    }
+
+    /// Returns the integer part of `self`.
+    /// This means that non-integer numbers are always truncated towards zero.
+    ///
+    /// This function always returns the precise result.
     ///
     /// # Examples
     ///
@@ -100,6 +144,8 @@ impl f32 {
     /// assert_eq!(g.trunc(), 3.0);
     /// assert_eq!(h.trunc(), -3.0);
     /// ```
+    #[doc(alias = "truncate")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -107,7 +153,9 @@ impl f32 {
         unsafe { intrinsics::truncf32(self) }
     }
 
-    /// Returns the fractional part of a number.
+    /// Returns the fractional part of `self`.
+    ///
+    /// This function always returns the precise result.
     ///
     /// # Examples
     ///
@@ -120,6 +168,7 @@ impl f32 {
     /// assert!(abs_difference_x <= f32::EPSILON);
     /// assert!(abs_difference_y <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -127,8 +176,9 @@ impl f32 {
         self - self.trunc()
     }
 
-    /// Computes the absolute value of `self`. Returns `NAN` if the
-    /// number is `NAN`.
+    /// Computes the absolute value of `self`.
+    ///
+    /// This function always returns the precise result.
     ///
     /// # Examples
     ///
@@ -136,14 +186,12 @@ impl f32 {
     /// let x = 3.5_f32;
     /// let y = -3.5_f32;
     ///
-    /// let abs_difference_x = (x.abs() - x).abs();
-    /// let abs_difference_y = (y.abs() - (-y)).abs();
-    ///
-    /// assert!(abs_difference_x <= f32::EPSILON);
-    /// assert!(abs_difference_y <= f32::EPSILON);
+    /// assert_eq!(x.abs(), x);
+    /// assert_eq!(y.abs(), -y);
     ///
     /// assert!(f32::NAN.abs().is_nan());
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -155,7 +203,7 @@ impl f32 {
     ///
     /// - `1.0` if the number is positive, `+0.0` or `INFINITY`
     /// - `-1.0` if the number is negative, `-0.0` or `NEG_INFINITY`
-    /// - `NAN` if the number is `NAN`
+    /// - NaN if the number is NaN
     ///
     /// # Examples
     ///
@@ -167,6 +215,7 @@ impl f32 {
     ///
     /// assert!(f32::NAN.signum().is_nan());
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -177,9 +226,16 @@ impl f32 {
     /// Returns a number composed of the magnitude of `self` and the sign of
     /// `sign`.
     ///
-    /// Equal to `self` if the sign of `self` and `sign` are the same, otherwise
-    /// equal to `-self`. If `self` is a `NAN`, then a `NAN` with the sign of
-    /// `sign` is returned.
+    /// Equal to `self` if the sign of `self` and `sign` are the same, otherwise equal to `-self`.
+    /// If `self` is a NaN, then a NaN with the same payload as `self` and the sign bit of `sign` is
+    /// returned.
+    ///
+    /// If `sign` is a NaN, then this operation will still carry over its sign into the result. Note
+    /// that IEEE 754 doesn't assign any meaning to the sign bit in case of a NaN, and as Rust
+    /// doesn't guarantee that the bit pattern of NaNs are conserved over arithmetic operations, the
+    /// result of `copysign` with `sign` being a NaN might produce an unexpected or non-portable
+    /// result. See the [specification of NaN bit patterns](primitive@f32#nan-bit-patterns) for more
+    /// info.
     ///
     /// # Examples
     ///
@@ -193,6 +249,7 @@ impl f32 {
     ///
     /// assert!(f32::NAN.copysign(1.0).is_nan());
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[inline]
     #[stable(feature = "copysign", since = "1.35.0")]
@@ -208,6 +265,12 @@ impl f32 {
     /// this is not always true, and will be heavily dependant on designing
     /// algorithms with specific target hardware in mind.
     ///
+    /// # Precision
+    ///
+    /// The result of this operation is guaranteed to be the rounded
+    /// infinite-precision result. It is specified by IEEE 754 as
+    /// `fusedMultiplyAdd` and guaranteed not to change.
+    ///
     /// # Examples
     ///
     /// ```
@@ -215,11 +278,19 @@ impl f32 {
     /// let x = 4.0_f32;
     /// let b = 60.0_f32;
     ///
-    /// // 100.0
-    /// let abs_difference = (m.mul_add(x, b) - ((m * x) + b)).abs();
+    /// assert_eq!(m.mul_add(x, b), 100.0);
+    /// assert_eq!(m * x + b, 100.0);
     ///
-    /// assert!(abs_difference <= f32::EPSILON);
+    /// let one_plus_eps = 1.0_f32 + f32::EPSILON;
+    /// let one_minus_eps = 1.0_f32 - f32::EPSILON;
+    /// let minus_one = -1.0_f32;
+    ///
+    /// // The exact result (1 + eps) * (1 - eps) = 1 - eps * eps.
+    /// assert_eq!(one_plus_eps.mul_add(one_minus_eps, minus_one), -f32::EPSILON * f32::EPSILON);
+    /// // Different rounding with the non-fused multiply and add.
+    /// assert_eq!(one_plus_eps * one_minus_eps + minus_one, 0.0);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -234,6 +305,11 @@ impl f32 {
     /// In other words, the result is `self / rhs` rounded to the integer `n`
     /// such that `self >= n * rhs`.
     ///
+    /// # Precision
+    ///
+    /// The result of this operation is guaranteed to be the rounded
+    /// infinite-precision result.
+    ///
     /// # Examples
     ///
     /// ```
@@ -244,6 +320,7 @@ impl f32 {
     /// assert_eq!(a.div_euclid(-b), -1.0); // 7.0 >= -4.0 * -1.0
     /// assert_eq!((-a).div_euclid(-b), 2.0); // -7.0 >= -4.0 * 2.0
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[inline]
     #[stable(feature = "euclidean_division", since = "1.38.0")]
@@ -264,7 +341,12 @@ impl f32 {
     /// This result is not an element of the function's codomain, but it is the
     /// closest floating point number in the real numbers and thus fulfills the
     /// property `self == self.div_euclid(rhs) * rhs + self.rem_euclid(rhs)`
-    /// approximatively.
+    /// approximately.
+    ///
+    /// # Precision
+    ///
+    /// The result of this operation is guaranteed to be the rounded
+    /// infinite-precision result.
     ///
     /// # Examples
     ///
@@ -278,6 +360,8 @@ impl f32 {
     /// // limitation due to round-off error
     /// assert!((-f32::EPSILON).rem_euclid(3.0) != 0.0);
     /// ```
+    #[doc(alias = "modulo", alias = "mod")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[inline]
     #[stable(feature = "euclidean_division", since = "1.38.0")]
@@ -288,7 +372,14 @@ impl f32 {
 
     /// Raises a number to an integer power.
     ///
-    /// Using this function is generally faster than using `powf`
+    /// Using this function is generally faster than using `powf`.
+    /// It might have a different sequence of rounding operations than `powf`,
+    /// so the results are not guaranteed to agree.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -298,6 +389,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -307,6 +399,11 @@ impl f32 {
 
     /// Raises a number to a floating point power.
     ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    ///
     /// # Examples
     ///
     /// ```
@@ -315,6 +412,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -326,6 +424,12 @@ impl f32 {
     ///
     /// Returns NaN if `self` is a negative number other than `-0.0`.
     ///
+    /// # Precision
+    ///
+    /// The result of this operation is guaranteed to be the rounded
+    /// infinite-precision result. It is specified by IEEE 754 as `squareRoot`
+    /// and guaranteed not to change.
+    ///
     /// # Examples
     ///
     /// ```
@@ -333,12 +437,11 @@ impl f32 {
     /// let negative = -4.0_f32;
     /// let negative_zero = -0.0_f32;
     ///
-    /// let abs_difference = (positive.sqrt() - 2.0).abs();
-    ///
-    /// assert!(abs_difference <= f32::EPSILON);
+    /// assert_eq!(positive.sqrt(), 2.0);
     /// assert!(negative.sqrt().is_nan());
     /// assert!(negative_zero.sqrt() == negative_zero);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -347,6 +450,11 @@ impl f32 {
     }
 
     /// Returns `e^(self)`, (the exponential function).
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -360,6 +468,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -368,6 +477,11 @@ impl f32 {
     }
 
     /// Returns `2^(self)`.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -379,6 +493,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -387,6 +502,11 @@ impl f32 {
     }
 
     /// Returns the natural logarithm of the number.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -400,6 +520,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -413,6 +534,11 @@ impl f32 {
     /// `self.log2()` can produce more accurate results for base 2, and
     /// `self.log10()` can produce more accurate results for base 10.
     ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    ///
     /// # Examples
     ///
     /// ```
@@ -423,6 +549,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -431,6 +558,11 @@ impl f32 {
     }
 
     /// Returns the base 2 logarithm of the number.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -442,17 +574,20 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn log2(self) -> f32 {
-        #[cfg(target_os = "android")]
-        return crate::sys::android::log2f32(self);
-        #[cfg(not(target_os = "android"))]
-        return unsafe { intrinsics::log2f32(self) };
+        unsafe { intrinsics::log2f32(self) }
     }
 
     /// Returns the base 10 logarithm of the number.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -464,6 +599,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -473,8 +609,15 @@ impl f32 {
 
     /// The positive difference of two numbers.
     ///
-    /// * If `self <= other`: `0:0`
+    /// * If `self <= other`: `0.0`
     /// * Else: `self - other`
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `fdimf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -488,24 +631,32 @@ impl f32 {
     /// assert!(abs_difference_x <= f32::EPSILON);
     /// assert!(abs_difference_y <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    #[rustc_deprecated(
+    #[deprecated(
         since = "1.10.0",
-        reason = "you probably meant `(self - other).abs()`: \
-                  this operation is `(self - other).max(0.0)` \
-                  except that `abs_sub` also propagates NaNs (also \
-                  known as `fdimf` in C). If you truly need the positive \
-                  difference, consider using that expression or the C function \
-                  `fdimf`, depending on how you wish to handle NaN (please consider \
-                  filing an issue describing your use-case too)."
+        note = "you probably meant `(self - other).abs()`: \
+                this operation is `(self - other).max(0.0)` \
+                except that `abs_sub` also propagates NaNs (also \
+                known as `fdimf` in C). If you truly need the positive \
+                difference, consider using that expression or the C function \
+                `fdimf`, depending on how you wish to handle NaN (please consider \
+                filing an issue describing your use-case too)."
     )]
     pub fn abs_sub(self, other: f32) -> f32 {
         unsafe { cmath::fdimf(self, other) }
     }
 
     /// Returns the cube root of a number.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `cbrtf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -517,6 +668,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -524,8 +676,17 @@ impl f32 {
         unsafe { cmath::cbrtf(self) }
     }
 
-    /// Calculates the length of the hypotenuse of a right-angle triangle given
-    /// legs of length `x` and `y`.
+    /// Compute the distance between the origin and a point (`x`, `y`) on the
+    /// Euclidean plane. Equivalently, compute the length of the hypotenuse of a
+    /// right-angle triangle with other sides having length `x.abs()` and
+    /// `y.abs()`.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `hypotf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -538,6 +699,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -546,6 +708,11 @@ impl f32 {
     }
 
     /// Computes the sine of a number (in radians).
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -556,6 +723,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -564,6 +732,11 @@ impl f32 {
     }
 
     /// Computes the cosine of a number (in radians).
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -574,6 +747,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -583,6 +757,13 @@ impl f32 {
 
     /// Computes the tangent of a number (in radians).
     ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `tanf` from libc on Unix and
+    /// Windows. Note that this might change in the future.
+    ///
     /// # Examples
     ///
     /// ```
@@ -591,6 +772,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -602,6 +784,13 @@ impl f32 {
     /// the range [-pi/2, pi/2] or NaN if the number is outside the range
     /// [-1, 1].
     ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `asinf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
+    ///
     /// # Examples
     ///
     /// ```
@@ -612,6 +801,8 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[doc(alias = "arcsin")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -623,6 +814,13 @@ impl f32 {
     /// the range [0, pi] or NaN if the number is outside the range
     /// [-1, 1].
     ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `acosf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
+    ///
     /// # Examples
     ///
     /// ```
@@ -633,6 +831,8 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[doc(alias = "arccos")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -642,6 +842,13 @@ impl f32 {
 
     /// Computes the arctangent of a number. Return value is in radians in the
     /// range [-pi/2, pi/2];
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `atanf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -653,6 +860,8 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[doc(alias = "arctan")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -666,6 +875,13 @@ impl f32 {
     /// * `x >= 0`: `arctan(y/x)` -> `[-pi/2, pi/2]`
     /// * `y >= 0`: `arctan(y/x) + pi` -> `(pi/2, pi]`
     /// * `y < 0`: `arctan(y/x) - pi` -> `(-pi, -pi/2)`
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `atan2f` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -686,6 +902,7 @@ impl f32 {
     /// assert!(abs_difference_1 <= f32::EPSILON);
     /// assert!(abs_difference_2 <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -695,6 +912,13 @@ impl f32 {
 
     /// Simultaneously computes the sine and cosine of the number, `x`. Returns
     /// `(sin(x), cos(x))`.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `(f32::sin(x),
+    /// f32::cos(x))`. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -708,6 +932,8 @@ impl f32 {
     /// assert!(abs_difference_0 <= f32::EPSILON);
     /// assert!(abs_difference_1 <= f32::EPSILON);
     /// ```
+    #[doc(alias = "sincos")]
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn sin_cos(self) -> (f32, f32) {
@@ -716,6 +942,13 @@ impl f32 {
 
     /// Returns `e^(self) - 1` in a way that is accurate even if the
     /// number is close to zero.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `expm1f` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -728,6 +961,7 @@ impl f32 {
     ///
     /// assert!(abs_difference < 1e-10);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -737,6 +971,13 @@ impl f32 {
 
     /// Returns `ln(1+n)` (natural logarithm) more accurately than if
     /// the operations were performed separately.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `log1pf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -749,6 +990,8 @@ impl f32 {
     ///
     /// assert!(abs_difference < 1e-10);
     /// ```
+    #[doc(alias = "log1p")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -757,6 +1000,13 @@ impl f32 {
     }
 
     /// Hyperbolic sine function.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `sinhf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -771,6 +1021,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -779,6 +1030,13 @@ impl f32 {
     }
 
     /// Hyperbolic cosine function.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `coshf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -793,6 +1051,7 @@ impl f32 {
     /// // Same result
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -801,6 +1060,13 @@ impl f32 {
     }
 
     /// Hyperbolic tangent function.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `tanhf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
     ///
     /// # Examples
     ///
@@ -815,6 +1081,7 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -823,6 +1090,11 @@ impl f32 {
     }
 
     /// Inverse hyperbolic sine function.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -834,14 +1106,23 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[doc(alias = "arcsinh")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn asinh(self) -> f32 {
-        (self.abs() + ((self * self) + 1.0).sqrt()).ln().copysign(self)
+        let ax = self.abs();
+        let ix = 1.0 / ax;
+        (ax + (ax / (Self::hypot(1.0, ix) + ix))).ln_1p().copysign(self)
     }
 
     /// Inverse hyperbolic cosine function.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -853,14 +1134,25 @@ impl f32 {
     ///
     /// assert!(abs_difference <= f32::EPSILON);
     /// ```
+    #[doc(alias = "arccosh")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn acosh(self) -> f32 {
-        if self < 1.0 { Self::NAN } else { (self + ((self * self) - 1.0).sqrt()).ln() }
+        if self < 1.0 {
+            Self::NAN
+        } else {
+            (self + ((self - 1.0).sqrt() * (self + 1.0).sqrt())).ln()
+        }
     }
 
     /// Inverse hyperbolic tangent function.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
     ///
     /// # Examples
     ///
@@ -872,10 +1164,70 @@ impl f32 {
     ///
     /// assert!(abs_difference <= 1e-5);
     /// ```
+    #[doc(alias = "arctanh")]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn atanh(self) -> f32 {
         0.5 * ((2.0 * self) / (1.0 - self)).ln_1p()
+    }
+
+    /// Gamma function.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `tgammaf` from libc on Unix
+    /// and Windows. Note that this might change in the future.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(float_gamma)]
+    /// let x = 5.0f32;
+    ///
+    /// let abs_difference = (x.gamma() - 24.0).abs();
+    ///
+    /// assert!(abs_difference <= f32::EPSILON);
+    /// ```
+    #[rustc_allow_incoherent_impl]
+    #[must_use = "method returns a new number and does not mutate the original value"]
+    #[unstable(feature = "float_gamma", issue = "99842")]
+    #[inline]
+    pub fn gamma(self) -> f32 {
+        unsafe { cmath::tgammaf(self) }
+    }
+
+    /// Natural logarithm of the absolute value of the gamma function
+    ///
+    /// The integer part of the tuple indicates the sign of the gamma function.
+    ///
+    /// # Unspecified precision
+    ///
+    /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
+    /// can even differ within the same execution from one invocation to the next.
+    /// This function currently corresponds to the `lgamma_r` from libc on Unix
+    /// and Windows. Note that this might change in the future.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(float_gamma)]
+    /// let x = 2.0f32;
+    ///
+    /// let abs_difference = (x.ln_gamma().0 - 0.0).abs();
+    ///
+    /// assert!(abs_difference <= f32::EPSILON);
+    /// ```
+    #[rustc_allow_incoherent_impl]
+    #[must_use = "method returns a new number and does not mutate the original value"]
+    #[unstable(feature = "float_gamma", issue = "99842")]
+    #[inline]
+    pub fn ln_gamma(self) -> (f32, i32) {
+        let mut signgamp: i32 = 0;
+        let x = unsafe { cmath::lgammaf_r(self, &mut signgamp) };
+        (x, signgamp)
     }
 }

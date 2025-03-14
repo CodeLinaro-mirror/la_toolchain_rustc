@@ -33,14 +33,13 @@ method of `RawVec`.
 ```rust,ignore
 impl<T> RawVec<T> {
     fn new() -> Self {
-        // !0 is usize::MAX. This branch should be stripped at compile time.
-        let cap = if mem::size_of::<T>() == 0 { !0 } else { 0 };
+        // This branch should be stripped at compile time.
+        let cap = if mem::size_of::<T>() == 0 { usize::MAX } else { 0 };
 
         // `NonNull::dangling()` doubles as "unallocated" and "zero-sized allocation"
         RawVec {
             ptr: NonNull::dangling(),
-            cap: cap,
-            _marker: PhantomData,
+            cap,
         }
     }
 
@@ -130,7 +129,41 @@ Now we have a different bug. Instead of our iterators not running at all, our
 iterators now run *forever*. We need to do the same trick in our iterator impls.
 Also, our size_hint computation code will divide by 0 for ZSTs. Since we'll
 basically be treating the two pointers as if they point to bytes, we'll just
-map size 0 to divide by 1.
+map size 0 to divide by 1. Here's what `next` will be:
+
+<!-- ignore: simplified code -->
+```rust,ignore
+fn next(&mut self) -> Option<T> {
+    if self.start == self.end {
+        None
+    } else {
+        unsafe {
+            let result = ptr::read(self.start);
+            self.start = if mem::size_of::<T>() == 0 {
+                (self.start as usize + 1) as *const _
+            } else {
+                self.start.offset(1)
+            };
+            Some(result)
+        }
+    }
+}
+```
+
+Do you see the "bug"? No one else did! The original author only noticed the
+problem when linking to this page years later. This code is kind of dubious
+because abusing the iterator pointers to be *counters* makes them unaligned!
+Our *one job* when using ZSTs is to keep pointers aligned! *forehead slap*
+
+Raw pointers don't need to be aligned at all times, so the basic trick of
+using pointers as counters is *fine*, but they *should* definitely be aligned
+when passed to `ptr::read`! This is *possibly* needless pedantry
+because `ptr::read` is a noop for a ZST, but let's be a *little* more
+responsible and read from `NonNull::dangling` on the ZST path.
+
+(Alternatively you could call `read_unaligned` on the ZST path. Either is fine,
+because either way we're making up a value from nothing and it all compiles
+to doing nothing.)
 
 <!-- ignore: simplified code -->
 ```rust,ignore
@@ -141,13 +174,14 @@ impl<T> Iterator for RawValIter<T> {
             None
         } else {
             unsafe {
-                let result = ptr::read(self.start);
-                self.start = if mem::size_of::<T>() == 0 {
-                    (self.start as usize + 1) as *const _
+                if mem::size_of::<T>() == 0 {
+                    self.start = (self.start as usize + 1) as *const _;
+                    Some(ptr::read(NonNull::<T>::dangling().as_ptr()))
                 } else {
-                    self.start.offset(1)
-                };
-                Some(result)
+                    let old_ptr = self.start;
+                    self.start = self.start.offset(1);
+                    Some(ptr::read(old_ptr))
+                }
             }
         }
     }
@@ -166,12 +200,13 @@ impl<T> DoubleEndedIterator for RawValIter<T> {
             None
         } else {
             unsafe {
-                self.end = if mem::size_of::<T>() == 0 {
-                    (self.end as usize - 1) as *const _
+                if mem::size_of::<T>() == 0 {
+                    self.end = (self.end as usize - 1) as *const _;
+                    Some(ptr::read(NonNull::<T>::dangling().as_ptr()))
                 } else {
-                    self.end.offset(-1)
-                };
-                Some(ptr::read(self.end))
+                    self.end = self.end.offset(-1);
+                    Some(ptr::read(self.end))
+                }
             }
         }
     }

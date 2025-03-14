@@ -7,26 +7,26 @@ error messages. This distinction enables users to choose to direct the
 successful output of a program to a file but still print error messages to the
 screen.
 
-The `println!` macro is only capable of printing to standard output, so we
-have to use something else to print to standard error.
+The `println!` macro is only capable of printing to standard output, so we have
+to use something else to print to standard error.
 
 ### Checking Where Errors Are Written
 
-First, let’s observe how the content printed by `minigrep` is currently being
+First let’s observe how the content printed by `minigrep` is currently being
 written to standard output, including any error messages we want to write to
 standard error instead. We’ll do that by redirecting the standard output stream
-to a file while also intentionally causing an error. We won’t redirect the
-standard error stream, so any content sent to standard error will continue to
-display on the screen.
+to a file while intentionally causing an error. We won’t redirect the standard
+error stream, so any content sent to standard error will continue to display on
+the screen.
 
 Command line programs are expected to send error messages to the standard error
 stream so we can still see error messages on the screen even if we redirect the
-standard output stream to a file. Our program is not currently well-behaved:
+standard output stream to a file. Our program is not currently well behaved:
 we’re about to see that it saves the error message output to a file instead!
 
-The way to demonstrate this behavior is by running the program with `>` and the
-filename, *output.txt*, that we want to redirect the standard output stream to.
-We won’t pass any arguments, which should cause an error:
+To demonstrate this behavior, we’ll run the program with `>` and the file path,
+*output.txt*, that we want to redirect the standard output stream to. We won’t
+pass any arguments, which should cause an error:
 
 ```console
 $ cargo run > output.txt
@@ -54,17 +54,16 @@ the `eprintln!` macro that prints to the standard error stream, so let’s chang
 the two places we were calling `println!` to print errors to use `eprintln!`
 instead.
 
-<span class="filename">Filename: src/main.rs</span>
+<Listing number="12-24" file-name="src/main.rs" caption="Writing error messages to standard error instead of standard output using `eprintln!`">
 
 ```rust,ignore
 {{#rustdoc_include ../listings/ch12-an-io-project/listing-12-24/src/main.rs:here}}
 ```
 
-<span class="caption">Listing 12-24: Writing error messages to standard error
-instead of standard output using `eprintln!`</span>
+</Listing>
 
-After changing `println!` to `eprintln!`, let’s run the program again in the
-same way, without any arguments and redirecting standard output with `>`:
+Let’s now run the program again in the same way, without any arguments and
+redirecting standard output with `>`:
 
 ```console
 $ cargo run > output.txt
@@ -78,7 +77,7 @@ Let’s run the program again with arguments that don’t cause an error but sti
 redirect standard output to a file, like so:
 
 ```console
-$ cargo run to poem.txt > output.txt
+$ cargo run -- to poem.txt > output.txt
 ```
 
 We won’t see any output to the terminal, and *output.txt* will contain our
@@ -99,10 +98,11 @@ and standard error for error output as appropriate.
 This chapter recapped some of the major concepts you’ve learned so far and
 covered how to perform common I/O operations in Rust. By using command line
 arguments, files, environment variables, and the `eprintln!` macro for printing
-errors, you’re now prepared to write command line applications. By using the
-concepts in previous chapters, your code will be well organized, store data
+errors, you’re now prepared to write command line applications. Combined with
+the concepts in previous chapters, your code will be well organized, store data
 effectively in the appropriate data structures, handle errors nicely, and be
 well tested.
 
 Next, we’ll explore some Rust features that were influenced by functional
 languages: closures and iterators.
+

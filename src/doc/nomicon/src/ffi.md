@@ -258,7 +258,7 @@ pub extern "C" fn hello_from_rust() {
 # fn main() {}
 ```
 
-The `extern "C"` makes this function adhere to the C calling convention, as discussed above in "[Foreign Calling Conventions]".
+The `extern "C"` makes this function adhere to the C calling convention, as discussed below in "[Foreign Calling Conventions]".
 The `no_mangle` attribute turns off Rust's name mangling, so that it has a well defined symbol to link to.
 
 Then, to compile Rust code as a shared library that can be called from C, add the following to your `Cargo.toml`:
@@ -281,6 +281,8 @@ We'll create a C file to call the `hello_from_rust` function and compile it by `
 C file should look like:
 
 ```c
+extern void hello_from_rust();
+
 int main(void) {
     hello_from_rust();
     return 0;
@@ -584,6 +586,7 @@ are:
 * `aapcs`
 * `cdecl`
 * `fastcall`
+* `thiscall`
 * `vectorcall`
 This is currently hidden behind the `abi_vectorcall` gate and is subject to change.
 * `Rust`
@@ -657,7 +660,8 @@ Certain Rust types are defined to never be `null`. This includes references (`&T
 `&mut T`), boxes (`Box<T>`), and function pointers (`extern "abi" fn()`). When
 interfacing with C, pointers that might be `null` are often used, which would seem to
 require some messy `transmute`s and/or unsafe code to handle conversions to/from Rust types.
-However, the language provides a workaround.
+However, trying to construct/work with these invalid values **is undefined behavior**,
+so you should use the following workaround instead.
 
 As a special case, an `enum` is eligible for the "nullable pointer optimization" if it contains
 exactly two variants, one of which contains no data and the other contains a field of one of the
@@ -716,17 +720,121 @@ void register(int (*f)(int (*)(int), int)) {
 
 No `transmute` required!
 
-## FFI and panics
+## FFI and unwinding
 
-It’s important to be mindful of `panic!`s when working with FFI. A `panic!`
-across an FFI boundary is undefined behavior. If you’re writing code that may
-panic, you should run it in a closure with [`catch_unwind`]:
+It’s important to be mindful of unwinding when working with FFI. Most
+ABI strings come in two variants, one with an `-unwind` suffix and one without.
+The `Rust` ABI always permits unwinding, so there is no `Rust-unwind` ABI.
+
+If you expect Rust `panic`s or foreign (e.g. C++) exceptions to cross an FFI
+boundary, that boundary must use the appropriate `-unwind` ABI string.
+Conversely, if you do not expect unwinding to cross an ABI boundary, use one of
+the non-`unwind` ABI strings.
+
+> Note: Compiling with `panic=abort` will still cause `panic!` to immediately
+abort the process, regardless of which ABI is specified by the function that
+`panic`s.
+
+If an unwinding operation does encounter an ABI boundary that is
+not permitted to unwind, the behavior depends on the source of the unwinding
+(Rust `panic` or a foreign exception):
+
+* `panic` will cause the process to safely abort.
+* A foreign exception entering Rust will cause undefined behavior.
+
+Note that the interaction of `catch_unwind` with foreign exceptions **is
+undefined**, as is the interaction of `panic` with foreign exception-catching
+mechanisms (notably C++'s `try`/`catch`).
+
+### Rust `panic` with `"C-unwind"`
+
+<!-- ignore: using unstable feature -->
+```rust,ignore
+#[no_mangle]
+extern "C-unwind" fn example() {
+    panic!("Uh oh");
+}
+```
+
+This function (when compiled with `panic=unwind`) is permitted to unwind C++
+stack frames.
+
+```text
+[Rust function with `catch_unwind`, which stops the unwinding]
+      |
+     ...
+      |
+[C++ frames]
+      |                           ^
+      | (calls)                   | (unwinding
+      v                           |  goes this
+[Rust function `example`]         |  way)
+      |                           |
+      +--- rust function panics --+
+```
+
+If the C++ frames have objects, their destructors will be called.
+
+### C++ `throw` with `"C-unwind"`
+
+<!-- ignore: using unstable feature -->
+```rust,ignore
+#[link(...)]
+extern "C-unwind" {
+    // A C++ function that may throw an exception
+    fn may_throw();
+}
+
+#[no_mangle]
+extern "C-unwind" fn rust_passthrough() {
+    let b = Box::new(5);
+    unsafe { may_throw(); }
+    println!("{:?}", &b);
+}
+```
+
+A C++ function with a `try` block may invoke `rust_passthrough` and `catch` an
+exception thrown by `may_throw`.
+
+```text
+[C++ function with `try` block that invokes `rust_passthrough`]
+      |
+     ...
+      |
+[Rust function `rust_passthrough`]
+      |                            ^
+      | (calls)                    | (unwinding
+      v                            |  goes this
+[C++ function `may_throw`]         |  way)
+      |                            |
+      +--- C++ function throws ----+
+```
+
+If `may_throw` does throw an exception, `b` will be dropped. Otherwise, `5`
+will be printed.
+
+### `panic` can be stopped at an ABI boundary
+
+```rust
+#[no_mangle]
+extern "C" fn assert_nonzero(input: u32) {
+    assert!(input != 0)
+}
+```
+
+If `assert_nonzero` is called with the argument `0`, the runtime is guaranteed
+to (safely) abort the process, whether or not compiled with `panic=abort`.
+
+### Catching `panic` preemptively
+
+If you are writing Rust code that may panic, and you don't wish to abort the
+process if it panics, you must use [`catch_unwind`]:
 
 ```rust
 use std::panic::catch_unwind;
 
 #[no_mangle]
-pub extern fn oh_no() -> i32 {
+pub extern "C" fn oh_no() -> i32 {
     let result = catch_unwind(|| {
         panic!("Oops!");
     });
@@ -740,7 +848,7 @@ fn main() {}
 ```
 
 Please note that [`catch_unwind`] will only catch unwinding panics, not
-those who abort the process. See the documentation of [`catch_unwind`]
+those that abort the process. See the documentation of [`catch_unwind`]
 for more information.
 
 [`catch_unwind`]: ../std/panic/fn.catch_unwind.html

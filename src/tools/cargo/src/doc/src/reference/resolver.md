@@ -7,8 +7,10 @@ result of the resolution is stored in the `Cargo.lock` file which "locks" the
 dependencies to specific versions, and keeps them fixed over time.
 
 The resolver attempts to unify common dependencies while considering possibly
-conflicting requirements. The sections below provide some details on how these
-constraints are handled, and how to work with the resolver.
+conflicting requirements. It turns out, however, that in many cases there is no
+single "best" dependency resolution, and so the resolver must use heuristics to
+choose a preferred solution. The sections below provide some details on how
+requirements are handled, and how to work with the resolver.
 
 See the chapter [Specifying Dependencies] for more details about how
 dependency requirements are specified.
@@ -37,17 +39,18 @@ with leading zeros. For example, `0.1.0` and `0.1.2` are compatible, but
 `0.1.0` and `0.2.0` are not. Similarly, `0.0.1` and `0.0.2` are not
 compatible.
 
-As a quick refresher, the *version requirement* syntax Cargo uses for
+As a quick refresher, the
+[*version requirement* syntax][Specifying Dependencies] Cargo uses for
 dependencies is:
 
 Requirement | Example | Equivalence | Description
---|--------|--|-------------
+------------|---------|-------------|-------------
 Caret | `1.2.3` or `^1.2.3` | <code>>=1.2.3,&nbsp;<2.0.0</code> | Any SemVer-compatible version of at least the given value.
 Tilde | `~1.2` | <code>>=1.2.0,&nbsp;<1.3.0</code> | Minimum version, with restricted compatibility range.
 Wildcard | `1.*` | <code>>=1.0.0,&nbsp;<2.0.0</code> | Any version in the `*` position.
 Equals | `=1.2.3` | <code>=1.2.3</code> | Exactly the specified version only.
 Comparison | `>1.1` | <code>>=1.2.0</code> | Naive numeric comparison of specified digits.
-Compound | <code>>=1.2,&nbsp;<1.5</code> | <code>>1.2.0,&nbsp;<1.5.0</code> | Multiple requirements that must be simultaneously satisfied.
+Compound | <code>>=1.2,&nbsp;<1.5</code> | <code>>=1.2.0,&nbsp;<1.5.0</code> | Multiple requirements that must be simultaneously satisfied.
 
 When multiple packages specify a dependency for a common package, the resolver
 attempts to ensure that they use the same version of that common package, as
@@ -159,12 +162,20 @@ explicitly asked to install one.
 
 Cargo allows "newer" pre-releases to be used automatically. For example, if
 `1.0.0-beta` is published, then a requirement `foo = "1.0.0-alpha"` will allow
-updating to the `beta` version. Beware that pre-release versions can be
-unstable, and as such care should be taken when using them. Some projects may
-choose to publish breaking changes between pre-release versions. It is
-recommended to not use pre-release dependencies in a library if your library
-is not also a pre-release. Care should also be taken when updating your
-`Cargo.lock`, and be prepared if a pre-release update causes issues.
+updating to the `beta` version. Note that this only works on the same release
+version, `foo = "1.0.0-alpha"` will not allow updating to `foo = "1.0.1-alpha"`
+or `foo = "1.0.1-beta"`.
+
+Cargo will also upgrade automatically to semver-compatible released versions
+from prereleases. The requirement `foo = "1.0.0-alpha"` will allow updating to
+`foo = "1.0.0"` as well as `foo = "1.2.0"`.
+
+Beware that pre-release versions can be unstable, and as such care should be
+taken when using them. Some projects may choose to publish breaking changes
+between pre-release versions. It is recommended to not use pre-release
+dependencies in a library if your library is not also a pre-release. Care
+should also be taken when updating your `Cargo.lock`, and be prepared if a
+pre-release update causes issues.
 
 The pre-release tag may be separated with periods to distinguish separate
 components. Numeric components will use numeric comparison. For example,
@@ -179,11 +190,7 @@ release. Non-numeric components are compared lexicographically.
 SemVer has the concept of "version metadata" with a plus in the version, such
 as `1.0.0+21AF26D3`. This metadata is usually ignored, and should not be used
 in a version requirement. You should never publish multiple versions that
-differ only in the metadata tag (note, this is a [known issue] with
-[crates.io] that currently permits this).
-
-[known issue]: https://github.com/rust-lang/crates.io/issues/1059
-[crates.io]: https://crates.io/
+differ only in the metadata tag.
 
 ## Other constraints
 
@@ -248,7 +255,7 @@ situations:
   not currently being built. For example:
 
   ```toml
-  [dependency.common]
+  [dependencies.common]
   version = "1.0"
   features = ["f1"]
 
@@ -318,9 +325,11 @@ the `links` field if your library is in common use.
 
 [Yanked releases][yank] are those that are marked that they should not be
 used. When the resolver is building the graph, it will ignore all yanked
-releases unless they already exist in the `Cargo.lock` file.
+releases unless they already exist in the `Cargo.lock` file or are explicitly
+requested by the [`--precise`] flag of `cargo update` (nightly only).
 
 [yank]: publishing.md#cargo-yank
+[`--precise`]: ../commands/cargo-update.md#option-cargo-update---precise
 
 ## Dependency updates
 
@@ -343,7 +352,7 @@ instead.
 [`cargo update`] can be used to update the entries in `Cargo.lock` when new
 versions are published. Without any options, it will attempt to update all
 packages in the lock file. The `-p` flag can be used to target the update for
-a specific package, and other flags such as `--aggressive` or `--precise` can
+a specific package, and other flags such as `--recursive` or `--precise` can
 be used to control how versions are selected.
 
 [`cargo build`]: ../commands/cargo-build.md
@@ -427,7 +436,7 @@ members = ["member1", "member2"]
 resolver = "2"
 ```
 
-[virtual workspace]: workspaces.md#virtual-manifest
+[virtual workspace]: workspaces.md#virtual-workspace
 [features-2]: features.md#feature-resolver-version-2
 
 ## Recommendations
@@ -465,10 +474,10 @@ situations may require specifying unusual requirements.
   If you fail to do this, it may not be immediately obvious because Cargo can
   opportunistically choose the newest version when you run a blanket `cargo
   update`. However, if another user depends on your library, and runs `cargo
-  update -p your-library`, it will *not* automatically update "bar" if it is
+  update your-library`, it will *not* automatically update "bar" if it is
   locked in their `Cargo.lock`. It will only update "bar" in that situation if
   the dependency declaration is also updated. Failure to do so can cause
-  confusing build errors for the user using `cargo update -p`.
+  confusing build errors for the user using `cargo update your-library`.
 * If two packages are tightly coupled, then an `=` dependency requirement may
   help ensure that they stay in sync. For example, a library with a companion
   proc-macro library will sometimes make assumptions between the two libraries
@@ -483,11 +492,88 @@ are too loose, it may be possible for new versions to be published that will
 break the build.
 
 [SemVer guidelines]: semver.md
+[crates.io]: https://crates.io/
 
 ## Troubleshooting
 
 The following illustrates some problems you may experience, and some possible
 solutions.
+
+### Why was a dependency included?
+
+Say you see dependency `rand` in the `cargo check` output but don't think it's needed and want to understand why it's being pulled in.
+
+You can run
+```console
+$ cargo tree --workspace --target all --all-features --invert rand
+rand v0.8.5
+└── ...
+
+rand v0.8.5
+└── ...
+```
+
+### Why was that feature on this dependency enabled?
+
+You might identify that it was an activated feature that caused `rand` to show up.  **To figure out which package activated the feature, you can add the `--edges features`**
+```console
+$ cargo tree --workspace --target all --all-features --edges features --invert rand
+rand v0.8.5
+└── ...
+
+rand v0.8.5
+└── ...
+```
+
+### Unexpected dependency duplication
+
+You see multiple instances of `rand` when you run
+```console
+$ cargo tree --workspace --target all --all-features --duplicates
+rand v0.7.3
+└── ...
+
+rand v0.8.5
+└── ...
+```
+
+The resolver algorithm has converged on a solution that includes two copies of a
+dependency when one would suffice. For example:
+
+```toml
+# Package A
+[dependencies]
+rand = "0.7"
+
+# Package B
+[dependencies]
+rand = ">=0.6"  # note: open requirements such as this are discouraged
+```
+
+In this example, Cargo may build two copies of the `rand` crate, even though a
+single copy at version `0.7.3` would meet all requirements. This is because the
+resolver's algorithm favors building the latest available version of `rand` for
+Package B, which is `0.8.5` at the time of this writing, and that is
+incompatible with Package A's specification. The resolver's algorithm does not
+currently attempt to "deduplicate" in this situation.
+
+The use of open-ended version requirements like `>=0.6` is discouraged in Cargo.
+But, if you run into this situation, the [`cargo update`] command with the
+`--precise` flag can be used to manually remove such duplications.
+
+[`cargo update`]: ../commands/cargo-update.md
+
+### Why wasn't a newer version selected?
+
+Say you noticed that the latest version of a dependency wasn't selected when you ran:
+```console
+$ cargo update
+```
+You can enable some extra logging to see why this happened:
+```console
+$ env CARGO_LOG=cargo::core::resolver=trace cargo update
+```
+**Note:** Cargo log targets and levels may change over time.
 
 ### SemVer-breaking patch release breaks the build
 

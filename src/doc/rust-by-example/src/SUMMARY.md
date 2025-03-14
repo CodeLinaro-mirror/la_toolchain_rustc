@@ -59,6 +59,7 @@
         - [Guards](flow_control/match/guard.md)
         - [Binding](flow_control/match/binding.md)
     - [if let](flow_control/if_let.md)
+    - [let-else](flow_control/let_else.md)
     - [while let](flow_control/while_let.md)
 
 - [Functions](fn.md)
@@ -155,10 +156,12 @@
 
 - [Error handling](error.md)
     - [`panic`](error/panic.md)
+    - [`abort` & `unwind`](error/abort_unwind.md)
     - [`Option` & `unwrap`](error/option_unwrap.md)
         - [Unpacking options with `?`](error/option_unwrap/question_mark.md)
         - [Combinators: `map`](error/option_unwrap/map.md)
         - [Combinators: `and_then`](error/option_unwrap/and_then.md)
+        - [Defaults: `or`, `or_else`, `get_or_insert`, `get_or_insert_with`](error/option_unwrap/defaults.md)
     - [`Result`](error/result.md)
         - [`map` for `Result`](error/result/result_map.md)
         - [aliases for `Result`](error/result/result_alias.md)
@@ -194,7 +197,7 @@
     - [File I/O](std_misc/file.md)
         - [`open`](std_misc/file/open.md)
         - [`create`](std_misc/file/create.md)
-        - [`read lines`](std_misc/file/read_lines.md)
+        - [`read_lines`](std_misc/file/read_lines.md)
     - [Child processes](std_misc/process.md)
         - [Pipes](std_misc/process/pipe.md)
         - [Wait](std_misc/process/wait.md)
@@ -217,4 +220,4 @@
 
 - [Meta](meta.md)
     - [Documentation](meta/doc.md)
-    - [Playpen](meta/playpen.md)
+    - [Playground](meta/playground.md)

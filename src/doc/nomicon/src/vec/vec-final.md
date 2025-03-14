@@ -10,7 +10,6 @@ use std::ptr::{self, NonNull};
 struct RawVec<T> {
     ptr: NonNull<T>,
     cap: usize,
-    _marker: PhantomData<T>,
 }
 
 unsafe impl<T: Send> Send for RawVec<T> {}
@@ -24,8 +23,7 @@ impl<T> RawVec<T> {
         // `NonNull::dangling()` doubles as "unallocated" and "zero-sized allocation"
         RawVec {
             ptr: NonNull::dangling(),
-            cap: cap,
-            _marker: PhantomData,
+            cap,
         }
     }
 
@@ -129,7 +127,7 @@ impl<T> Vec<T> {
 
     pub fn insert(&mut self, index: usize, elem: T) {
         assert!(index <= self.len, "index out of bounds");
-        if self.cap() == self.len {
+        if self.len == self.cap() {
             self.buf.grow();
         }
 
@@ -140,14 +138,17 @@ impl<T> Vec<T> {
                 self.len - index,
             );
             ptr::write(self.ptr().add(index), elem);
-            self.len += 1;
         }
+
+        self.len += 1;
     }
 
     pub fn remove(&mut self, index: usize) -> T {
         assert!(index < self.len, "index out of bounds");
+
+        self.len -= 1;
+
         unsafe {
-            self.len -= 1;
             let result = ptr::read(self.ptr().add(index));
             ptr::copy(
                 self.ptr().add(index + 1),
@@ -158,32 +159,17 @@ impl<T> Vec<T> {
         }
     }
 
-    pub fn into_iter(self) -> IntoIter<T> {
-        unsafe {
-            let iter = RawValIter::new(&self);
-            let buf = ptr::read(&self.buf);
-            mem::forget(self);
-
-            IntoIter {
-                iter: iter,
-                _buf: buf,
-            }
-        }
-    }
-
     pub fn drain(&mut self) -> Drain<T> {
-        unsafe {
-            let iter = RawValIter::new(&self);
+        let iter = unsafe { RawValIter::new(&self) };
 
-            // this is a mem::forget safety thing. If Drain is forgotten, we just
-            // leak the whole Vec's contents. Also we need to do this *eventually*
-            // anyway, so why not do it now?
-            self.len = 0;
+        // this is a mem::forget safety thing. If Drain is forgotten, we just
+        // leak the whole Vec's contents. Also we need to do this *eventually*
+        // anyway, so why not do it now?
+        self.len = 0;
 
-            Drain {
-                iter: iter,
-                vec: PhantomData,
-            }
+        Drain {
+            iter,
+            vec: PhantomData,
         }
     }
 }
@@ -205,6 +191,23 @@ impl<T> Deref for Vec<T> {
 impl<T> DerefMut for Vec<T> {
     fn deref_mut(&mut self) -> &mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr(), self.len) }
+    }
+}
+
+impl<T> IntoIterator for Vec<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+    fn into_iter(self) -> IntoIter<T> {
+        let (iter, buf) = unsafe {
+            (RawValIter::new(&self), ptr::read(&self.buf))
+        };
+
+        mem::forget(self);
+
+        IntoIter {
+            iter,
+            _buf: buf,
+        }
     }
 }
 
@@ -235,21 +238,22 @@ impl<T> Iterator for RawValIter<T> {
             None
         } else {
             unsafe {
-                let result = ptr::read(self.start);
-                self.start = if mem::size_of::<T>() == 0 {
-                    (self.start as usize + 1) as *const _
+                if mem::size_of::<T>() == 0 {
+                    self.start = (self.start as usize + 1) as *const _;
+                    Some(ptr::read(NonNull::<T>::dangling().as_ptr()))
                 } else {
-                    self.start.offset(1)
-                };
-                Some(result)
+                    let old_ptr = self.start;
+                    self.start = self.start.offset(1);
+                    Some(ptr::read(old_ptr))
+                }
             }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let elem_size = mem::size_of::<T>();
-        let len = (self.end as usize - self.start as usize) /
-                  if elem_size == 0 { 1 } else { elem_size };
+        let len = (self.end as usize - self.start as usize)
+                  / if elem_size == 0 { 1 } else { elem_size };
         (len, Some(len))
     }
 }
@@ -260,12 +264,13 @@ impl<T> DoubleEndedIterator for RawValIter<T> {
             None
         } else {
             unsafe {
-                self.end = if mem::size_of::<T>() == 0 {
-                    (self.end as usize - 1) as *const _
+                if mem::size_of::<T>() == 0 {
+                    self.end = (self.end as usize - 1) as *const _;
+                    Some(ptr::read(NonNull::<T>::dangling().as_ptr()))
                 } else {
-                    self.end.offset(-1)
-                };
-                Some(ptr::read(self.end))
+                    self.end = self.end.offset(-1);
+                    Some(ptr::read(self.end))
+                }
             }
         }
     }

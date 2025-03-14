@@ -10,7 +10,7 @@ This is a guide for how to profile rustc with [perf](https://perf.wiki.kernel.or
   - `debuginfo-level = 1` - enables line debuginfo
   - `jemalloc = false` - lets you do memory use profiling with valgrind
   - leave everything else the defaults
-- Run `./x.py build` to get a full build
+- Run `./x build` to get a full build
 - Make a rustup toolchain pointing to that result
   - see [the "build and run" section for instructions][b-a-r]
 
@@ -54,50 +54,28 @@ you made in the beginning. But there are some things to be aware of:
 
 ### Gathering a perf profile from a `perf.rust-lang.org` test
 
-Often we want to analyze a specific test from `perf.rust-lang.org`. To
-do that, the first step is to clone
-[the rustc-perf repository][rustc-perf-gh]:
+Often we want to analyze a specific test from `perf.rust-lang.org`.
+The easiest way to do that is to use the [rustc-perf][rustc-perf]
+benchmarking suite, this approach is described [here](with_rustc_perf.md).
+
+Instead of using the benchmark suite CLI, you can also profile the benchmarks manually. First,
+you need to clone the [rustc-perf][rustc-perf] repository:
 
 ```bash
-git clone https://github.com/rust-lang/rustc-perf
+$ git clone https://github.com/rust-lang/rustc-perf
 ```
 
-[rustc-perf-gh]: https://github.com/rust-lang/rustc-perf
+and then find the source code of the test that you want to profile. Sources for the tests
+are found in [the `collector/compile-benchmarks` directory][compile-time dir]
+and [the `collector/runtime-benchmarks` directory][runtime dir]. So let's
+go into the directory of a specific test; we'll use `clap-rs` as an example:
 
-#### Doing it the easy way
-
-Once you've cloned the repo, you can use the `collector` executable to
-do profiling for you! You can find
-[instructions in the rustc-perf readme][rustc-perf-readme].
-
-[rustc-perf-readme]: https://github.com/rust-lang/rustc-perf/blob/master/collector/README.md#profiling
-
-For example, to measure the clap-rs test, you might do:
+[rustc-perf]: https://github.com/rust-lang/rustc-perf
+[compile-time dir]: https://github.com/rust-lang/rustc-perf/tree/master/collector/compile-benchmarks
+[runtime dir]: https://github.com/rust-lang/rustc-perf/tree/master/collector/runtime-benchmarks
 
 ```bash
-./target/release/collector                                      \
-  --output-repo /path/to/place/output                           \
-  profile perf-record                                           \
-  --rustc /path/to/rustc/executable/from/your/build/directory   \
-  --cargo `which cargo`                                         \
-  --filter clap-rs                                              \
-  --builds Check                                                \
-```
-
-You can also use that same command to use cachegrind or other profiling tools.
-
-#### Doing it the hard way
-
-If you prefer to run things manually, that is also possible. You first
-need to find the source for the test you want. Sources for the tests
-are found in [the `collector/benchmarks` directory][dir]. So let's go
-into the directory of a specific test; we'll use `clap-rs` as an
-example:
-
-[dir]: https://github.com/rust-lang/rustc-perf/tree/master/collector/benchmarks
-
-```bash
-cd collector/benchmarks/clap-rs
+cd collector/compile-benchmarks/clap-3.1.6
 ```
 
 In this case, let's say we want to profile the `cargo check`
@@ -281,7 +259,7 @@ Tree
 What happens with `--tree-callees` is that
 
 - we find each sample matching the regular expression
-- we look at the code that is occurs *after* the regex match and try
+- we look at the code that occurs *after* the regex match and try
   to build up a call tree
 
 The `--tree-min-percent 3` option says "only show me things that take

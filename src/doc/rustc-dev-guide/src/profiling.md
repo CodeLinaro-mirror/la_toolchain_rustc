@@ -17,9 +17,9 @@ Depending on what you're trying to measure, there are several different approach
     full-featured graphical interface.
 
 - If you want a nice visual representation of the compile times of your crate graph,
-  you can use [cargo's `-Z timings` flag](https://doc.rust-lang.org/cargo/reference/unstable.html#timings),
-  eg. `cargo -Z timings build`.
-  You can use this flag on the compiler itself with `CARGOFLAGS="-Z timings" ./x.py build`
+  you can use [cargo's `--timings` flag](https://doc.rust-lang.org/nightly/cargo/reference/timings.html),
+  e.g. `cargo build --timings`.
+  You can use this flag on the compiler itself with `CARGOFLAGS="--timings" ./x build`
 
 - If you want to profile memory usage, you can use various tools depending on what operating system
   you are using.
@@ -41,11 +41,11 @@ extension in LLVM bitcode format.
 Example usage:
 ```
 cargo install cargo-llvm-lines
-# On a normal crate you could now run `cargo llvm-lines`, but `x.py` isn't normal :P
+# On a normal crate you could now run `cargo llvm-lines`, but `x` isn't normal :P
 
 # Do a clean before every run, to not mix in the results from previous runs.
-./x.py clean
-env RUSTFLAGS=-Csave-temps ./x.py build --stage 0 compiler/rustc
+./x clean
+env RUSTFLAGS=-Csave-temps ./x build --stage 0 compiler/rustc
 
 # Single crate, e.g., rustc_middle. (Relies on the glob support of your shell.)
 # Convert unoptimized LLVM bitcode into a human readable LLVM assembly accepted by cargo-llvm-lines.
@@ -85,7 +85,7 @@ Example output for the compiler:
     326903 (0.7%)      642 (0.0%)  rustc_query_system::query::plumbing::try_execute_query
 ```
 
-Since this doesn't seem to work with incremental compilation or `./x.py check`,
+Since this doesn't seem to work with incremental compilation or `./x check`,
 you will be compiling rustc _a lot_.
 I recommend changing a few settings in `config.toml` to make it bearable:
 ```
@@ -108,5 +108,6 @@ The llvm-lines output is affected by several options.
 
 MIR optimizations have little impact. Compared to the default `RUSTFLAGS="-Z
 mir-opt-level=1"`, level 0 adds 0.3GB and level 2 removes 0.2GB.
-As of <!-- date: 2021-01 --> January 2021, inlining currently only happens in
-LLVM but this might change in the future.
+As of <!-- date-check --> July 2022,
+inlining happens in LLVM and GCC codegen backends,
+missing only in the Cranelift one.

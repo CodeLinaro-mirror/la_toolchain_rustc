@@ -1,3 +1,0 @@
-#!/bin/sh
-# Hack to work around https://github.com/rust-analyzer/rust-analyzer/issues/10793.
-exec "$(dirname "$0")"/../miri "$@"

@@ -76,7 +76,7 @@ executed, no results are cached. But the context already provides access to
 "input" data, i.e. pieces of immutable data that were computed before the
 context was created and that queries can access to do their computations.
 
-As of <!-- date: 2021-01 --> January 2021, this input data consists mainly of
+As of <!-- date-check --> January 2021, this input data consists mainly of
 the HIR map, upstream crate metadata, and the command-line options the compiler
 was invoked with; but in the future inputs will just consist of command-line
 options and a list of source files -- the HIR map will itself be provided by a
@@ -174,9 +174,9 @@ Since query providers are regular functions, this would behave much as expected:
 Evaluation would get stuck in an infinite recursion. A query like this would not
 be very useful either. However, sometimes certain kinds of invalid user input
 can result in queries being called in a cyclic way. The query engine includes
-a check for cyclic invocations and, because cycles are an irrecoverable error,
-will abort execution with a "cycle error" messages that tries to be human
-readable.
+a check for cyclic invocations of queries with the same input arguments. 
+And, because cycles are an irrecoverable error, will abort execution with a 
+"cycle error" message that tries to be human readable.
 
 At some point the compiler had a notion of "cycle recovery", that is, one could
 "try" to execute a query and if it ended up causing a cycle, proceed in some
@@ -201,8 +201,8 @@ OK as long as the mutation is not observable. This is achieved by two things:
 - Before a result is stolen, we make sure to eagerly run all queries that
   might ever need to read that result. This has to be done manually by calling
   those queries.
-- Whenever a query tries to access a stolen result, we make the compiler ICE so
-  that such a condition cannot go unnoticed.
+- Whenever a query tries to access a stolen result, we make an ICE
+  (Internal Compiler Error) so that such a condition cannot go unnoticed.
 
 This is not an ideal setup because of the manual intervention needed, so it
 should be used sparingly and only when it is well known which queries might

@@ -1,12 +1,12 @@
 # Stability attributes
 
-<!-- toc -->
-
 This section is about the stability attributes and schemes that allow stable
 APIs to use unstable APIs internally in the rustc standard library.
 
-For instructions on stabilizing a language feature see [Stabilizing
-Features](./stabilization_guide.md).
+**NOTE**: this section is for *library* features, not *language* features. For instructions on
+stabilizing a language feature see [Stabilizing Features](./stabilization_guide.md).
+
+<!-- toc -->
 
 ## unstable
 
@@ -30,10 +30,11 @@ them. The stability scheme works similarly to how `pub` works. You can have
 public functions of nonpublic modules and you can have stable functions in
 unstable modules or vice versa.
 
-Note, however, that due to a [rustc bug], stable items inside unstable modules
-*are* available to stable code in that location!  So, for example, stable code
-can import `core::intrinsics::transmute` even though `intrinsics` is an
-unstable module.  Thus, this kind of nesting should be avoided when possible.
+Previously, due to a [rustc bug], stable items inside unstable modules were
+available to stable code in that location.
+As of <!-- date-check --> September 2024, items with [accidentally stabilized
+paths] are marked with the `#[rustc_allowed_through_unstable_modules]` attribute
+to prevent code dependent on those paths from breaking.
 
 The `unstable` attribute may also have the `soft` value, which makes it a
 future-incompatible deny-by-default lint instead of a hard error. This is used
@@ -42,6 +43,7 @@ prevents breaking dependencies by leveraging Cargo's lint capping.
 
 [issue number]: https://github.com/rust-lang/rust/issues
 [rustc bug]: https://github.com/rust-lang/rust/issues/15702
+[accidentally stabilized paths]: https://github.com/rust-lang/rust/issues/113387
 
 ## stable
 The `#[stable(feature = "foo", since = "1.420.69")]` attribute explicitly
@@ -49,11 +51,11 @@ marks an item as stabilized. Note that stable functions may use unstable things 
 
 ## rustc_const_unstable
 
-The `#[rustc_const_unstable(feature = "foo", issue = "1234", reason = "lorem ipsum")]`
-has the same interface as the `unstable` attribute. It is used to mark
-`const fn` as having their constness be unstable. This allows you to make a
-function stable without stabilizing its constness or even just marking an existing
-stable function as `const fn` without instantly stabilizing the `const fn`ness.
+The `#[rustc_const_unstable(feature = "foo", issue = "1234", reason = "lorem
+ipsum")]` has the same interface as the `unstable` attribute. It is used to mark
+`const fn` as having their constness be unstable. Every `const fn` with
+stability attributes should carry either this attribute or
+`#[rustc_const_stable]` (see below).
 
 Furthermore this attribute is needed to mark an intrinsic as `const fn`, because
 there's no way to add `const` to functions in `extern` blocks for now.
@@ -68,20 +70,28 @@ even on an `unstable` function, if that function is called from another
 Furthermore this attribute is needed to mark an intrinsic as callable from
 `rustc_const_stable` functions.
 
+## rustc_default_body_unstable
+
+The `#[rustc_default_body_unstable(feature = "foo", issue = "1234", reason =
+"lorem ipsum")]` attribute has the same interface as the `unstable` attribute.
+It is used to mark the default implementation for an item within a trait as
+unstable.
+A trait with a default-body-unstable item can be implemented stably by providing
+an explicit body for any such item, or the default body can be used by enabling
+its corresponding `#![feature]`.
+
 ## Stabilizing a library feature
 
 To stabilize a feature, follow these steps:
 
-0. Ask a **@T-libs-api** member to start an FCP on the tracking issue and wait for
+1. Ask a **@T-libs-api** member to start an FCP on the tracking issue and wait for
    the FCP to complete (with `disposition-merge`).
-1. Change `#[unstable(...)]` to `#[stable(since = "version")]`.
-   `version` should be the *current nightly*, i.e. stable+2. You can see which version is
-   the current nightly [on Forge](https://forge.rust-lang.org/#current-release-versions).
-2. Remove `#![feature(...)]` from any test or doc-test for this API. If the feature is used in the
+2. Change `#[unstable(...)]` to `#[stable(since = "CURRENT_RUSTC_VERSION")]`.
+3. Remove `#![feature(...)]` from any test or doc-test for this API. If the feature is used in the
    compiler or tools, remove it from there as well.
-3. If applicable, change `#[rustc_const_unstable(...)]` to
-   `#[rustc_const_stable(since = "version")]`.
-4. Open a PR against `rust-lang/rust`.
+4. If applicable, change `#[rustc_const_unstable(...)]` to
+   `#[rustc_const_stable(since = "CURRENT_RUSTC_VERSION")]`.
+5. Open a PR against `rust-lang/rust`.
    - Add the appropriate labels: `@rustbot modify labels: +T-libs-api`.
    - Link to the tracking issue and say "Closes #XXXXX".
 
@@ -121,24 +131,21 @@ Always ping @rust-lang/wg-const-eval if you are adding more
 
 ## staged_api
 
-Any crate that uses the `stable`, `unstable`, or `rustc_deprecated` attributes
-must include the `#![feature(staged_api)]` attribute on the crate.
+Any crate that uses the `stable` or `unstable` attributes must include the
+`#![feature(staged_api)]` attribute on the crate.
 
-## rustc_deprecated
+## deprecated
 
-The deprecation system shares the same infrastructure as the stable/unstable
-attributes. The `rustc_deprecated` attribute is similar to the [`deprecated`
-attribute]. It was previously called `deprecated`, but was split off when
-`deprecated` was stabilized. The `deprecated` attribute cannot be used in a
-`staged_api` crate, `rustc_deprecated` must be used instead. The deprecated
-item must also have a `stable` or `unstable` attribute.
+Deprecations in the standard library are nearly identical to deprecations in
+user code. When `#[deprecated]` is used on an item, it must also have a `stable`
+or `unstable `attribute.
 
-`rustc_deprecated` has the following form:
+`deprecated` has the following form:
 
 ```rust,ignore
-#[rustc_deprecated(
+#[deprecated(
     since = "1.38.0",
-    reason = "explanation for deprecation",
+    note = "explanation for deprecation",
     suggestion = "other_function"
 )]
 ```
@@ -146,13 +153,13 @@ item must also have a `stable` or `unstable` attribute.
 The `suggestion` field is optional. If given, it should be a string that can be
 used as a machine-applicable suggestion to correct the warning. This is
 typically used when the identifier is renamed, but no other significant changes
-are necessary.
+are necessary. When the `suggestion` field is used, you need to have
+`#![feature(deprecated_suggestion)]` at the crate root.
 
-Another difference from the `deprecated` attribute is that the `since` field is
-actually checked against the current version of `rustc`. If `since` is in a
-future version, then the `deprecated_in_future` lint is triggered which is
-default `allow`, but most of the standard library raises it to a warning with
+Another difference from user code is that the `since` field is actually checked
+against the current version of `rustc`. If `since` is in a future version, then
+the `deprecated_in_future` lint is triggered which is default `allow`, but most
+of the standard library raises it to a warning with
 `#![warn(deprecated_in_future)]`.
 
-[`deprecated` attribute]: https://doc.rust-lang.org/reference/attributes/diagnostics.html#the-deprecated-attribute
 [blog]: https://www.ralfj.de/blog/2018/07/19/const.html

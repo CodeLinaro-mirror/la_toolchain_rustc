@@ -4,13 +4,21 @@
 //!
 //! The crate also contains other misc AST visitors, e.g. `node_count` and `show_span`.
 
-#![feature(iter_is_partitioned)]
+// tidy-alphabetical-start
+#![allow(internal_features)]
+#![doc(rust_logo)]
 #![feature(box_patterns)]
-#![feature(let_else)]
-#![recursion_limit = "256"]
-#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
+#![feature(if_let_guard)]
+#![feature(iter_is_partitioned)]
+#![feature(let_chains)]
+#![feature(rustdoc_internals)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 pub mod ast_validation;
+mod errors;
 pub mod feature_gate;
 pub mod node_count;
 pub mod show_span;
+
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

@@ -29,12 +29,12 @@ using namespace lldb_private::process_freebsd;
 
 NativeRegisterContextFreeBSD *
 NativeRegisterContextFreeBSD::CreateHostNativeRegisterContextFreeBSD(
-    const ArchSpec &target_arch, NativeThreadProtocol &native_thread) {
+    const ArchSpec &target_arch, NativeThreadFreeBSD &native_thread) {
   return new NativeRegisterContextFreeBSD_arm(target_arch, native_thread);
 }
 
 NativeRegisterContextFreeBSD_arm::NativeRegisterContextFreeBSD_arm(
-    const ArchSpec &target_arch, NativeThreadProtocol &native_thread)
+    const ArchSpec &target_arch, NativeThreadFreeBSD &native_thread)
     : NativeRegisterContextRegisterInfo(
           native_thread, new RegisterInfoPOSIX_arm(target_arch)) {}
 
@@ -140,7 +140,7 @@ Status NativeRegisterContextFreeBSD_arm::WriteRegister(
 }
 
 Status NativeRegisterContextFreeBSD_arm::ReadAllRegisterValues(
-    lldb::DataBufferSP &data_sp) {
+    lldb::WritableDataBufferSP &data_sp) {
   Status error;
 
   error = ReadRegisterSet(RegisterInfoPOSIX_arm::GPRegSet);
@@ -177,7 +177,7 @@ Status NativeRegisterContextFreeBSD_arm::WriteAllRegisterValues(
     return error;
   }
 
-  uint8_t *src = data_sp->GetBytes();
+  const uint8_t *src = data_sp->GetBytes();
   if (src == nullptr) {
     error.SetErrorStringWithFormat("NativeRegisterContextFreeBSD_arm::%s "
                                    "DataBuffer::GetBytes() returned a null "

@@ -5,6 +5,8 @@ set(LLVM_LINK_COMPONENTS
   Core
   Support
   TransformUtils
+  Passes
+  Vectorize
   )
 
 add_llvm_unittest(UtilsTests
@@ -13,18 +15,21 @@ add_llvm_unittest(UtilsTests
   CallPromotionUtilsTest.cpp
   CloningTest.cpp
   CodeExtractorTest.cpp
+  CodeLayoutTest.cpp
   CodeMoverUtilsTest.cpp
   DebugifyTest.cpp
+  DXILResourceTest.cpp
   FunctionComparatorTest.cpp
   IntegerDivisionTest.cpp
   LocalTest.cpp
   LoopRotationUtilsTest.cpp
   LoopUtilsTest.cpp
+  MemTransferLowering.cpp
   ModuleUtilsTest.cpp
   ScalarEvolutionExpanderTest.cpp
   SizeOptsTest.cpp
   SSAUpdaterBulkTest.cpp
   UnrollLoopTest.cpp
   ValueMapperTest.cpp
-  VFABIUtils.cpp
+  ProfDataUtilTest.cpp
   )

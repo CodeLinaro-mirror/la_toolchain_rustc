@@ -1,15 +1,21 @@
-use crate::core::compiler::{CompileKind, CompileMode, CrateType};
+//! Types and impls for [`Unit`].
+
+use crate::core::compiler::unit_dependencies::IsArtifact;
+use crate::core::compiler::{CompileKind, CompileMode, CompileTarget, CrateType};
 use crate::core::manifest::{Target, TargetKind};
-use crate::core::{profiles::Profile, Package};
+use crate::core::profiles::Profile;
+use crate::core::Package;
 use crate::util::hex::short_hash;
 use crate::util::interning::InternedString;
-use crate::util::Config;
+use crate::util::GlobalContext;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::rc::Rc;
+
+use super::BuildOutput;
 
 /// All information needed to define a unit.
 ///
@@ -55,6 +61,37 @@ pub struct UnitInner {
     /// The `cfg` features to enable for this unit.
     /// This must be sorted.
     pub features: Vec<InternedString>,
+    /// Extra compiler flags to pass to `rustc` for a given unit.
+    ///
+    /// Although it depends on the caller, in the current Cargo implementation,
+    /// these flags take precedence over those from [`BuildContext::extra_args_for`].
+    ///
+    /// As of now, these flags come from environment variables and configurations.
+    /// See [`TargetInfo.rustflags`] for more on how Cargo collects them.
+    ///
+    /// [`BuildContext::extra_args_for`]: crate::core::compiler::build_context::BuildContext::extra_args_for
+    /// [`TargetInfo.rustflags`]: crate::core::compiler::build_context::TargetInfo::rustflags
+    pub rustflags: Rc<[String]>,
+    /// Extra compiler flags to pass to `rustdoc` for a given unit.
+    ///
+    /// Although it depends on the caller, in the current Cargo implementation,
+    /// these flags take precedence over those from [`BuildContext::extra_args_for`].
+    ///
+    /// As of now, these flags come from environment variables and configurations.
+    /// See [`TargetInfo.rustdocflags`] for more on how Cargo collects them.
+    ///
+    /// [`BuildContext::extra_args_for`]: crate::core::compiler::build_context::BuildContext::extra_args_for
+    /// [`TargetInfo.rustdocflags`]: crate::core::compiler::build_context::TargetInfo::rustdocflags
+    pub rustdocflags: Rc<[String]>,
+    /// Build script override for the given library name.
+    ///
+    /// Any package with a `links` value for the given library name will skip
+    /// running its build script and instead use the given output from the
+    /// config file.
+    pub links_overrides: Rc<BTreeMap<String, BuildOutput>>,
+    // if `true`, the dependency is an artifact dependency, requiring special handling when
+    // calculating output directories, linkage and environment variables provided to builds.
+    pub artifact: IsArtifact,
     /// Whether this is a standard library unit.
     pub is_std: bool,
     /// A hash of all dependencies of this unit.
@@ -69,6 +106,12 @@ pub struct UnitInner {
     /// This value initially starts as 0, and then is filled in via a
     /// second-pass after all the unit dependencies have been computed.
     pub dep_hash: u64,
+
+    /// This is used for target-dependent feature resolution and is copied from
+    /// [`FeaturesFor::ArtifactDep`], if the enum matches the variant.
+    ///
+    /// [`FeaturesFor::ArtifactDep`]: crate::core::resolver::features::FeaturesFor::ArtifactDep
+    pub artifact_target_for_features: Option<CompileTarget>,
 }
 
 impl UnitInner {
@@ -91,12 +134,15 @@ impl UnitInner {
     }
 
     /// Returns whether or not warnings should be displayed for this unit.
-    pub fn show_warnings(&self, config: &Config) -> bool {
-        self.is_local() || config.extra_verbose()
+    pub fn show_warnings(&self, gctx: &GlobalContext) -> bool {
+        self.is_local() || gctx.extra_verbose()
     }
 }
 
 impl Unit {
+    /// Gets the unique key for [`-Zbuild-plan`].
+    ///
+    /// [`-Zbuild-plan`]: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#build-plan
     pub fn buildkey(&self) -> String {
         format!("{}-{}", self.pkg.name(), short_hash(self))
     }
@@ -135,6 +181,14 @@ impl fmt::Debug for Unit {
             .field("kind", &self.kind)
             .field("mode", &self.mode)
             .field("features", &self.features)
+            .field("rustflags", &self.rustflags)
+            .field("rustdocflags", &self.rustdocflags)
+            .field("links_overrides", &self.links_overrides)
+            .field("artifact", &self.artifact.is_true())
+            .field(
+                "artifact_target_for_features",
+                &self.artifact_target_for_features,
+            )
             .field("is_std", &self.is_std)
             .field("dep_hash", &self.dep_hash)
             .finish()
@@ -177,8 +231,13 @@ impl UnitInterner {
         kind: CompileKind,
         mode: CompileMode,
         features: Vec<InternedString>,
+        rustflags: Rc<[String]>,
+        rustdocflags: Rc<[String]>,
+        links_overrides: Rc<BTreeMap<String, BuildOutput>>,
         is_std: bool,
         dep_hash: u64,
+        artifact: IsArtifact,
+        artifact_target_for_features: Option<CompileTarget>,
     ) -> Unit {
         let target = match (is_std, target.kind()) {
             // This is a horrible hack to support build-std. `libstd` declares
@@ -208,8 +267,13 @@ impl UnitInterner {
             kind,
             mode,
             features,
+            rustflags,
+            rustdocflags,
+            links_overrides,
             is_std,
             dep_hash,
+            artifact,
+            artifact_target_for_features,
         });
         Unit { inner }
     }

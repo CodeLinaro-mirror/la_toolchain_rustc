@@ -4,7 +4,7 @@
 //! are splitting the hir.
 
 use hir_def::{
-    expr::{LabelId, PatId},
+    hir::{BindingId, LabelId},
     AdtId, AssocItemId, DefWithBodyId, EnumVariantId, FieldId, GenericDefId, GenericParamId,
     ModuleDefId, VariantId,
 };
@@ -15,7 +15,7 @@ use crate::{
 };
 
 macro_rules! from_id {
-    ($(($id:path, $ty:path)),*) => {$(
+    ($(($id:path, $ty:path)),* $(,)?) => {$(
         impl From<$id> for $ty {
             fn from(id: $id) -> $ty {
                 $ty { id }
@@ -37,14 +37,18 @@ from_id![
     (hir_def::EnumId, crate::Enum),
     (hir_def::TypeAliasId, crate::TypeAlias),
     (hir_def::TraitId, crate::Trait),
+    (hir_def::TraitAliasId, crate::TraitAlias),
     (hir_def::StaticId, crate::Static),
     (hir_def::ConstId, crate::Const),
+    (hir_def::InTypeConstId, crate::InTypeConst),
     (hir_def::FunctionId, crate::Function),
     (hir_def::ImplId, crate::Impl),
+    (hir_def::TypeOrConstParamId, crate::TypeOrConstParam),
     (hir_def::TypeParamId, crate::TypeParam),
-    (hir_def::LifetimeParamId, crate::LifetimeParam),
     (hir_def::ConstParamId, crate::ConstParam),
-    (hir_expand::MacroDefId, crate::MacroDef)
+    (hir_def::LifetimeParamId, crate::LifetimeParam),
+    (hir_def::MacroId, crate::Macro),
+    (hir_def::ExternCrateId, crate::ExternCrateDecl),
 ];
 
 impl From<AdtId> for Adt {
@@ -71,8 +75,8 @@ impl From<GenericParamId> for GenericParam {
     fn from(id: GenericParamId) -> Self {
         match id {
             GenericParamId::TypeParamId(it) => GenericParam::TypeParam(it.into()),
-            GenericParamId::LifetimeParamId(it) => GenericParam::LifetimeParam(it.into()),
             GenericParamId::ConstParamId(it) => GenericParam::ConstParam(it.into()),
+            GenericParamId::LifetimeParamId(it) => GenericParam::LifetimeParam(it.into()),
         }
     }
 }
@@ -80,22 +84,22 @@ impl From<GenericParamId> for GenericParam {
 impl From<GenericParam> for GenericParamId {
     fn from(id: GenericParam) -> Self {
         match id {
-            GenericParam::TypeParam(it) => GenericParamId::TypeParamId(it.id),
             GenericParam::LifetimeParam(it) => GenericParamId::LifetimeParamId(it.id),
             GenericParam::ConstParam(it) => GenericParamId::ConstParamId(it.id),
+            GenericParam::TypeParam(it) => GenericParamId::TypeParamId(it.id),
         }
     }
 }
 
 impl From<EnumVariantId> for Variant {
     fn from(id: EnumVariantId) -> Self {
-        Variant { parent: id.parent.into(), id: id.local_id }
+        Variant { id }
     }
 }
 
 impl From<Variant> for EnumVariantId {
     fn from(def: Variant) -> Self {
-        EnumVariantId { parent: def.parent.id, local_id: def.id }
+        def.id
     }
 }
 
@@ -109,8 +113,10 @@ impl From<ModuleDefId> for ModuleDef {
             ModuleDefId::ConstId(it) => ModuleDef::Const(it.into()),
             ModuleDefId::StaticId(it) => ModuleDef::Static(it.into()),
             ModuleDefId::TraitId(it) => ModuleDef::Trait(it.into()),
+            ModuleDefId::TraitAliasId(it) => ModuleDef::TraitAlias(it.into()),
             ModuleDefId::TypeAliasId(it) => ModuleDef::TypeAlias(it.into()),
             ModuleDefId::BuiltinType(it) => ModuleDef::BuiltinType(it.into()),
+            ModuleDefId::MacroId(it) => ModuleDef::Macro(it.into()),
         }
     }
 }
@@ -125,8 +131,10 @@ impl From<ModuleDef> for ModuleDefId {
             ModuleDef::Const(it) => ModuleDefId::ConstId(it.into()),
             ModuleDef::Static(it) => ModuleDefId::StaticId(it.into()),
             ModuleDef::Trait(it) => ModuleDefId::TraitId(it.into()),
+            ModuleDef::TraitAlias(it) => ModuleDefId::TraitAliasId(it.into()),
             ModuleDef::TypeAlias(it) => ModuleDefId::TypeAliasId(it.into()),
             ModuleDef::BuiltinType(it) => ModuleDefId::BuiltinType(it.into()),
+            ModuleDef::Macro(it) => ModuleDefId::MacroId(it.into()),
         }
     }
 }
@@ -137,6 +145,8 @@ impl From<DefWithBody> for DefWithBodyId {
             DefWithBody::Function(it) => DefWithBodyId::FunctionId(it.id),
             DefWithBody::Static(it) => DefWithBodyId::StaticId(it.id),
             DefWithBody::Const(it) => DefWithBodyId::ConstId(it.id),
+            DefWithBody::Variant(it) => DefWithBodyId::VariantId(it.into()),
+            DefWithBody::InTypeConst(it) => DefWithBodyId::InTypeConstId(it.id),
         }
     }
 }
@@ -147,6 +157,8 @@ impl From<DefWithBodyId> for DefWithBody {
             DefWithBodyId::FunctionId(it) => DefWithBody::Function(it.into()),
             DefWithBodyId::StaticId(it) => DefWithBody::Static(it.into()),
             DefWithBodyId::ConstId(it) => DefWithBody::Const(it.into()),
+            DefWithBodyId::VariantId(it) => DefWithBody::Variant(it.into()),
+            DefWithBodyId::InTypeConstId(it) => DefWithBody::InTypeConst(it.into()),
         }
     }
 }
@@ -167,11 +179,9 @@ impl From<GenericDef> for GenericDefId {
             GenericDef::Function(it) => GenericDefId::FunctionId(it.id),
             GenericDef::Adt(it) => GenericDefId::AdtId(it.into()),
             GenericDef::Trait(it) => GenericDefId::TraitId(it.id),
+            GenericDef::TraitAlias(it) => GenericDefId::TraitAliasId(it.id),
             GenericDef::TypeAlias(it) => GenericDefId::TypeAliasId(it.id),
             GenericDef::Impl(it) => GenericDefId::ImplId(it.id),
-            GenericDef::Variant(it) => {
-                GenericDefId::EnumVariantId(EnumVariantId { parent: it.parent.id, local_id: it.id })
-            }
             GenericDef::Const(it) => GenericDefId::ConstId(it.id),
         }
     }
@@ -183,11 +193,9 @@ impl From<GenericDefId> for GenericDef {
             GenericDefId::FunctionId(it) => GenericDef::Function(it.into()),
             GenericDefId::AdtId(it) => GenericDef::Adt(it.into()),
             GenericDefId::TraitId(it) => GenericDef::Trait(it.into()),
+            GenericDefId::TraitAliasId(it) => GenericDef::TraitAlias(it.into()),
             GenericDefId::TypeAliasId(it) => GenericDef::TypeAlias(it.into()),
             GenericDefId::ImplId(it) => GenericDef::Impl(it.into()),
-            GenericDefId::EnumVariantId(it) => {
-                GenericDef::Variant(Variant { parent: it.parent.into(), id: it.local_id })
-            }
             GenericDefId::ConstId(it) => GenericDef::Const(it.into()),
         }
     }
@@ -245,9 +253,9 @@ impl From<AssocItem> for GenericDefId {
     }
 }
 
-impl From<(DefWithBodyId, PatId)> for Local {
-    fn from((parent, pat_id): (DefWithBodyId, PatId)) -> Self {
-        Local { parent, pat_id }
+impl From<(DefWithBodyId, BindingId)> for Local {
+    fn from((parent, binding_id): (DefWithBodyId, BindingId)) -> Self {
+        Local { parent, binding_id }
     }
 }
 

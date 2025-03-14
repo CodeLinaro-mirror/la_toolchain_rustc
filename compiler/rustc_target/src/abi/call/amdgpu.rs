@@ -17,7 +17,7 @@ where
     arg.extend_integer_width_to(32);
 }
 
-pub fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>)
+pub(crate) fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>)
 where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout,
@@ -26,7 +26,7 @@ where
         classify_ret(cx, &mut fn_abi.ret);
     }
 
-    for arg in &mut fn_abi.args {
+    for arg in fn_abi.args.iter_mut() {
         if arg.is_ignore() {
             continue;
         }

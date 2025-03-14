@@ -2,12 +2,12 @@
 name = "stdarch-verify"
 version = "0.1.0"
 authors = ["Alex Crichton <alex@alexcrichton.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "1.0", features = ["full"] }
+syn = { version = "2.0", features = ["full"] }
 
 [lib]
 proc-macro = true
@@ -15,5 +15,5 @@ test = false
 
 [dev-dependencies]
 serde = { version = "1.0", features = ['derive'] }
-serde-xml-rs = "0.3"
-html5ever = "0.23.0"
+serde_json = "1.0.96"
+quick-xml = { version = "0.33.0", features = ["serialize", "overlapped-lists"] }

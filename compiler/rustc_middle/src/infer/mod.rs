@@ -1,22 +1,24 @@
 pub mod canonical;
 pub mod unify_key;
 
-use crate::ty::Region;
-use crate::ty::Ty;
 use rustc_data_structures::sync::Lrc;
-use rustc_hir::def_id::DefId;
+use rustc_macros::{HashStable, TypeFoldable, TypeVisitable};
 use rustc_span::Span;
+
+use crate::ty::{OpaqueTypeKey, Region, Ty};
 
 /// Requires that `region` must be equal to one of the regions in `choice_regions`.
 /// We often denote this using the syntax:
 ///
-/// ```
+/// ```text
 /// R0 member of [O1..On]
 /// ```
-#[derive(Debug, Clone, HashStable, TypeFoldable, Lift)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(HashStable, TypeFoldable, TypeVisitable)]
 pub struct MemberConstraint<'tcx> {
-    /// The `DefId` of the opaque type causing this constraint: used for error reporting.
-    pub opaque_type_def_id: DefId,
+    /// The `DefId` and args of the opaque type causing this constraint.
+    /// Used for error reporting.
+    pub key: OpaqueTypeKey<'tcx>,
 
     /// The span where the hidden type was instantiated.
     pub definition_span: Span,

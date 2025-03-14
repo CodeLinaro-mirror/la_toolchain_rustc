@@ -1,54 +1,49 @@
-//! Module for generating dep-info files.
-//!
-//! `rustc` generates a dep-info file with a `.d` extension at the same
-//! location of the output artifacts as a result of using `--emit=dep-info`.
-//! This dep-info file is a Makefile-like syntax that indicates the
-//! dependencies needed to build the artifact. Example:
-//!
-//! ```makefile
-//! /path/to/target/debug/deps/cargo-b6219d178925203d: src/bin/main.rs src/bin/cargo/cli.rs # … etc.
-//! ```
-//!
-//! The fingerprint module has code to parse these files, and stores them as
-//! binary format in the fingerprint directory. These are used to quickly scan
-//! for any changed files.
-//!
-//! On top of all this, Cargo emits its own dep-info files in the output
-//! directory. This is done for every "uplifted" artifact. These are intended
-//! to be used with external build systems so that they can detect if Cargo
-//! needs to be re-executed. It includes all the entries from the `rustc`
-//! dep-info file, and extends it with any `rerun-if-changed` entries from
-//! build scripts. It also includes sources from any path dependencies. Registry
-//! dependencies are not included under the assumption that changes to them can
-//! be detected via changes to `Cargo.lock`.
+//! dep-info files for external build system integration.
+//! See [`output_depinfo`] for more.
 
+use cargo_util::paths::normalize_path;
 use std::collections::{BTreeSet, HashSet};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use super::{fingerprint, Context, FileFlavor, Unit};
+use super::{fingerprint, BuildRunner, FileFlavor, Unit};
 use crate::util::{internal, CargoResult};
 use cargo_util::paths;
-use log::debug;
+use tracing::debug;
 
+/// Bacially just normalizes a given path and converts it to a string.
 fn render_filename<P: AsRef<Path>>(path: P, basedir: Option<&str>) -> CargoResult<String> {
+    fn wrap_path(path: &Path) -> CargoResult<String> {
+        path.to_str()
+            .ok_or_else(|| internal(format!("path `{:?}` not utf-8", path)))
+            .map(|f| f.replace(" ", "\\ "))
+    }
+
     let path = path.as_ref();
-    let relpath = match basedir {
-        None => path,
-        Some(base) => match path.strip_prefix(base) {
-            Ok(relpath) => relpath,
-            _ => path,
-        },
-    };
-    relpath
-        .to_str()
-        .ok_or_else(|| internal(format!("path `{:?}` not utf-8", relpath)))
-        .map(|f| f.replace(" ", "\\ "))
+    if let Some(basedir) = basedir {
+        let norm_path = normalize_path(path);
+        let norm_basedir = normalize_path(basedir.as_ref());
+        match norm_path.strip_prefix(norm_basedir) {
+            Ok(relpath) => wrap_path(relpath),
+            _ => wrap_path(path),
+        }
+    } else {
+        wrap_path(path)
+    }
 }
 
+/// Collects all dependencies of the `unit` for the output dep info file.
+///
+/// Dependencies will be stored in `deps`, including:
+///
+/// * dependencies from [fingerprint dep-info]
+/// * paths from `rerun-if-changed` build script instruction
+/// * ...and traverse transitive dependencies recursively
+///
+/// [fingerprint dep-info]: super::fingerprint#fingerprint-dep-info-files
 fn add_deps_for_unit(
     deps: &mut BTreeSet<PathBuf>,
-    cx: &mut Context<'_, '_>,
+    build_runner: &mut BuildRunner<'_, '_>,
     unit: &Unit,
     visited: &mut HashSet<Unit>,
 ) -> CargoResult<()> {
@@ -60,11 +55,13 @@ fn add_deps_for_unit(
     // generate a dep info file, so we just keep on going below
     if !unit.mode.is_run_custom_build() {
         // Add dependencies from rustc dep-info output (stored in fingerprint directory)
-        let dep_info_loc = fingerprint::dep_info_loc(cx, unit);
-        if let Some(paths) =
-            fingerprint::parse_dep_info(unit.pkg.root(), cx.files().host_root(), &dep_info_loc)?
-        {
-            for path in paths.files {
+        let dep_info_loc = fingerprint::dep_info_loc(build_runner, unit);
+        if let Some(paths) = fingerprint::parse_dep_info(
+            unit.pkg.root(),
+            build_runner.files().host_root(),
+            &dep_info_loc,
+        )? {
+            for path in paths.files.into_keys() {
                 deps.insert(path);
             }
         } else {
@@ -78,8 +75,13 @@ fn add_deps_for_unit(
     }
 
     // Add rerun-if-changed dependencies
-    if let Some(metadata) = cx.find_build_script_metadata(unit) {
-        if let Some(output) = cx.build_script_outputs.lock().unwrap().get(metadata) {
+    if let Some(metadata) = build_runner.find_build_script_metadata(unit) {
+        if let Some(output) = build_runner
+            .build_script_outputs
+            .lock()
+            .unwrap()
+            .get(metadata)
+        {
             for path in &output.rerun_if_changed {
                 // The paths we have saved from the unit are of arbitrary relativeness and may be
                 // relative to the crate root of the dependency.
@@ -90,28 +92,42 @@ fn add_deps_for_unit(
     }
 
     // Recursively traverse all transitive dependencies
-    let unit_deps = Vec::from(cx.unit_deps(unit)); // Create vec due to mutable borrow.
+    let unit_deps = Vec::from(build_runner.unit_deps(unit)); // Create vec due to mutable borrow.
     for dep in unit_deps {
         if dep.unit.is_local() {
-            add_deps_for_unit(deps, cx, &dep.unit, visited)?;
+            add_deps_for_unit(deps, build_runner, &dep.unit, visited)?;
         }
     }
     Ok(())
 }
 
-/// Save a `.d` dep-info file for the given unit.
+/// Save a `.d` dep-info file for the given unit. This is the third kind of
+/// dep-info mentioned in [`fingerprint`] module.
 ///
-/// This only saves files for uplifted artifacts.
-pub fn output_depinfo(cx: &mut Context<'_, '_>, unit: &Unit) -> CargoResult<()> {
-    let bcx = cx.bcx;
+/// Argument `unit` is expected to be the root unit, which will be uplifted.
+///
+/// Cargo emits its own dep-info files in the output directory. This is
+/// only done for every "uplifted" artifact. These are intended to be used
+/// with external build systems so that they can detect if Cargo needs to be
+/// re-executed.
+///
+/// It includes all the entries from the `rustc` dep-info file, and extends it
+/// with any `rerun-if-changed` entries from build scripts. It also includes
+/// sources from any path dependencies. Registry dependencies are not included
+/// under the assumption that changes to them can be detected via changes to
+/// `Cargo.lock`.
+///
+/// [`fingerprint`]: super::fingerprint#dep-info-files
+pub fn output_depinfo(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<()> {
+    let bcx = build_runner.bcx;
     let mut deps = BTreeSet::new();
     let mut visited = HashSet::new();
-    let success = add_deps_for_unit(&mut deps, cx, unit, &mut visited).is_ok();
+    let success = add_deps_for_unit(&mut deps, build_runner, unit, &mut visited).is_ok();
     let basedir_string;
-    let basedir = match bcx.config.build_config()?.dep_info_basedir.clone() {
+    let basedir = match bcx.gctx.build_config()?.dep_info_basedir.clone() {
         Some(value) => {
             basedir_string = value
-                .resolve_path(bcx.config)
+                .resolve_path(bcx.gctx)
                 .as_os_str()
                 .to_str()
                 .ok_or_else(|| anyhow::format_err!("build.dep-info-basedir path not utf-8"))?
@@ -125,7 +141,7 @@ pub fn output_depinfo(cx: &mut Context<'_, '_>, unit: &Unit) -> CargoResult<()> 
         .map(|f| render_filename(f, basedir))
         .collect::<CargoResult<Vec<_>>>()?;
 
-    for output in cx
+    for output in build_runner
         .outputs(unit)?
         .iter()
         .filter(|o| !matches!(o.flavor, FileFlavor::DebugInfo | FileFlavor::Auxiliary))
@@ -138,7 +154,12 @@ pub fn output_depinfo(cx: &mut Context<'_, '_>, unit: &Unit) -> CargoResult<()> 
                 // If nothing changed don't recreate the file which could alter
                 // its mtime
                 if let Ok(previous) = fingerprint::parse_rustc_dep_info(&output_path) {
-                    if previous.files.iter().eq(deps.iter().map(Path::new)) {
+                    if previous
+                        .files
+                        .iter()
+                        .map(|(path, _checksum)| path)
+                        .eq(deps.iter().map(Path::new))
+                    {
                         continue;
                     }
                 }

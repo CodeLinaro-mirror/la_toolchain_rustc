@@ -12,13 +12,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ARMRegisterInfo.h"
+#include "ARMMCTargetDesc.h"
 #include "ARMUnwindOpAsm.h"
+#include "Utils/ARMBaseInfo.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/MC/MCAsmBackend.h"
@@ -46,7 +47,6 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormattedStream.h"
-#include "llvm/Support/TargetParser.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cassert>
@@ -94,24 +94,34 @@ class ARMTargetAsmStreamer : public ARMTargetStreamer {
   void emitArch(ARM::ArchKind Arch) override;
   void emitArchExtension(uint64_t ArchExt) override;
   void emitObjectArch(ARM::ArchKind Arch) override;
-  void emitFPU(unsigned FPU) override;
+  void emitFPU(ARM::FPUKind FPU) override;
   void emitInst(uint32_t Inst, char Suffix = '\0') override;
   void finishAttributeSection() override;
 
-  void AnnotateTLSDescriptorSequence(const MCSymbolRefExpr *SRE) override;
+  void annotateTLSDescriptorSequence(const MCSymbolRefExpr *SRE) override;
   void emitThumbSet(MCSymbol *Symbol, const MCExpr *Value) override;
+
+  void emitARMWinCFIAllocStack(unsigned Size, bool Wide) override;
+  void emitARMWinCFISaveRegMask(unsigned Mask, bool Wide) override;
+  void emitARMWinCFISaveSP(unsigned Reg) override;
+  void emitARMWinCFISaveFRegs(unsigned First, unsigned Last) override;
+  void emitARMWinCFISaveLR(unsigned Offset) override;
+  void emitARMWinCFIPrologEnd(bool Fragment) override;
+  void emitARMWinCFINop(bool Wide) override;
+  void emitARMWinCFIEpilogStart(unsigned Condition) override;
+  void emitARMWinCFIEpilogEnd() override;
+  void emitARMWinCFICustom(unsigned Opcode) override;
 
 public:
   ARMTargetAsmStreamer(MCStreamer &S, formatted_raw_ostream &OS,
-                       MCInstPrinter &InstPrinter, bool VerboseAsm);
+                       MCInstPrinter &InstPrinter);
 };
 
 ARMTargetAsmStreamer::ARMTargetAsmStreamer(MCStreamer &S,
                                            formatted_raw_ostream &OS,
-                                           MCInstPrinter &InstPrinter,
-                                           bool VerboseAsm)
+                                           MCInstPrinter &InstPrinter)
     : ARMTargetStreamer(S), OS(OS), InstPrinter(InstPrinter),
-      IsVerboseAsm(VerboseAsm) {}
+      IsVerboseAsm(S.isVerboseAsm()) {}
 
 void ARMTargetAsmStreamer::emitFnStart() { OS << "\t.fnstart\n"; }
 void ARMTargetAsmStreamer::emitFnEnd() { OS << "\t.fnend\n"; }
@@ -191,7 +201,12 @@ void ARMTargetAsmStreamer::emitTextAttribute(unsigned Attribute,
     OS << "\t.cpu\t" << String.lower();
     break;
   default:
-    OS << "\t.eabi_attribute\t" << Attribute << ", \"" << String << "\"";
+    OS << "\t.eabi_attribute\t" << Attribute << ", \"";
+    if (Attribute == ARMBuildAttrs::also_compatible_with)
+      OS.write_escaped(String);
+    else
+      OS << String;
+    OS << "\"";
     if (IsVerboseAsm) {
       StringRef Name = ELFAttrs::attrTypeAsString(
           Attribute, ARMBuildAttrs::getARMAttributeTags());
@@ -233,14 +248,14 @@ void ARMTargetAsmStreamer::emitObjectArch(ARM::ArchKind Arch) {
   OS << "\t.object_arch\t" << ARM::getArchName(Arch) << '\n';
 }
 
-void ARMTargetAsmStreamer::emitFPU(unsigned FPU) {
+void ARMTargetAsmStreamer::emitFPU(ARM::FPUKind FPU) {
   OS << "\t.fpu\t" << ARM::getFPUName(FPU) << "\n";
 }
 
 void ARMTargetAsmStreamer::finishAttributeSection() {}
 
-void
-ARMTargetAsmStreamer::AnnotateTLSDescriptorSequence(const MCSymbolRefExpr *S) {
+void ARMTargetAsmStreamer::annotateTLSDescriptorSequence(
+    const MCSymbolRefExpr *S) {
   OS << "\t.tlsdescseq\t" << S->getSymbol().getName() << "\n";
 }
 
@@ -269,10 +284,105 @@ void ARMTargetAsmStreamer::emitUnwindRaw(int64_t Offset,
   OS << '\n';
 }
 
+void ARMTargetAsmStreamer::emitARMWinCFIAllocStack(unsigned Size, bool Wide) {
+  if (Wide)
+    OS << "\t.seh_stackalloc_w\t" << Size << "\n";
+  else
+    OS << "\t.seh_stackalloc\t" << Size << "\n";
+}
+
+static void printRegs(formatted_raw_ostream &OS, ListSeparator &LS, int First,
+                      int Last) {
+  if (First != Last)
+    OS << LS << "r" << First << "-r" << Last;
+  else
+    OS << LS << "r" << First;
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFISaveRegMask(unsigned Mask, bool Wide) {
+  if (Wide)
+    OS << "\t.seh_save_regs_w\t";
+  else
+    OS << "\t.seh_save_regs\t";
+  ListSeparator LS;
+  int First = -1;
+  OS << "{";
+  for (int I = 0; I <= 12; I++) {
+    if (Mask & (1 << I)) {
+      if (First < 0)
+        First = I;
+    } else {
+      if (First >= 0) {
+        printRegs(OS, LS, First, I - 1);
+        First = -1;
+      }
+    }
+  }
+  if (First >= 0)
+    printRegs(OS, LS, First, 12);
+  if (Mask & (1 << 14))
+    OS << LS << "lr";
+  OS << "}\n";
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFISaveSP(unsigned Reg) {
+  OS << "\t.seh_save_sp\tr" << Reg << "\n";
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFISaveFRegs(unsigned First,
+                                                  unsigned Last) {
+  if (First != Last)
+    OS << "\t.seh_save_fregs\t{d" << First << "-d" << Last << "}\n";
+  else
+    OS << "\t.seh_save_fregs\t{d" << First << "}\n";
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFISaveLR(unsigned Offset) {
+  OS << "\t.seh_save_lr\t" << Offset << "\n";
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFIPrologEnd(bool Fragment) {
+  if (Fragment)
+    OS << "\t.seh_endprologue_fragment\n";
+  else
+    OS << "\t.seh_endprologue\n";
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFINop(bool Wide) {
+  if (Wide)
+    OS << "\t.seh_nop_w\n";
+  else
+    OS << "\t.seh_nop\n";
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFIEpilogStart(unsigned Condition) {
+  if (Condition == ARMCC::AL)
+    OS << "\t.seh_startepilogue\n";
+  else
+    OS << "\t.seh_startepilogue_cond\t"
+       << ARMCondCodeToString(static_cast<ARMCC::CondCodes>(Condition)) << "\n";
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFIEpilogEnd() {
+  OS << "\t.seh_endepilogue\n";
+}
+
+void ARMTargetAsmStreamer::emitARMWinCFICustom(unsigned Opcode) {
+  int I;
+  for (I = 3; I > 0; I--)
+    if (Opcode & (0xffu << (8 * I)))
+      break;
+  ListSeparator LS;
+  OS << "\t.seh_custom\t";
+  for (; I >= 0; I--)
+    OS << LS << ((Opcode >> (8 * I)) & 0xff);
+  OS << "\n";
+}
+
 class ARMTargetELFStreamer : public ARMTargetStreamer {
 private:
   StringRef CurrentVendor;
-  unsigned FPU = ARM::FK_INVALID;
+  ARM::FPUKind FPU = ARM::FK_INVALID;
   ARM::ArchKind Arch = ARM::ArchKind::INVALID;
   ARM::ArchKind EmittedArch = ARM::ArchKind::INVALID;
 
@@ -304,16 +414,18 @@ private:
                             StringRef StringValue) override;
   void emitArch(ARM::ArchKind Arch) override;
   void emitObjectArch(ARM::ArchKind Arch) override;
-  void emitFPU(unsigned FPU) override;
+  void emitFPU(ARM::FPUKind FPU) override;
   void emitInst(uint32_t Inst, char Suffix = '\0') override;
   void finishAttributeSection() override;
   void emitLabel(MCSymbol *Symbol) override;
 
-  void AnnotateTLSDescriptorSequence(const MCSymbolRefExpr *SRE) override;
+  void annotateTLSDescriptorSequence(const MCSymbolRefExpr *SRE) override;
   void emitThumbSet(MCSymbol *Symbol, const MCExpr *Value) override;
 
   // Reset state between object emissions
   void reset() override;
+
+  void finish() override;
 
 public:
   ARMTargetELFStreamer(MCStreamer &S)
@@ -348,8 +460,6 @@ public:
 
   ~ARMELFStreamer() override = default;
 
-  void finishImpl() override;
-
   // ARM exception handling directives
   void emitFnStart();
   void emitFnEnd();
@@ -368,7 +478,7 @@ public:
     MCObjectStreamer::emitFill(NumBytes, FillValue, Loc);
   }
 
-  void changeSection(MCSection *Section, const MCExpr *Subsection) override {
+  void changeSection(MCSection *Section, uint32_t Subsection) override {
     LastMappingSymbols[getCurrentSection().first] = std::move(LastEMSInfo);
     MCELFStreamer::changeSection(Section, Subsection);
     auto LastMappingSymbol = LastMappingSymbols.find(Section);
@@ -376,7 +486,7 @@ public:
       LastEMSInfo = std::move(LastMappingSymbol->second);
       return;
     }
-    LastEMSInfo.reset(new ElfMappingSymbolInfo(SMLoc(), nullptr, 0));
+    LastEMSInfo.reset(new ElfMappingSymbolInfo);
   }
 
   /// This function is the one used to emit instruction data into the ELF
@@ -444,7 +554,7 @@ public:
     if (!LastEMSInfo->hasInfo())
       return;
     ElfMappingSymbolInfo *EMS = LastEMSInfo.get();
-    EmitMappingSymbol("$d", EMS->Loc, EMS->F, EMS->Offset);
+    emitMappingSymbol("$d", *EMS->F, EMS->Offset);
     EMS->resetInfo();
   }
 
@@ -514,17 +624,14 @@ private:
   };
 
   struct ElfMappingSymbolInfo {
-    explicit ElfMappingSymbolInfo(SMLoc Loc, MCFragment *F, uint64_t O)
-        : Loc(Loc), F(F), Offset(O), State(EMS_None) {}
     void resetInfo() {
       F = nullptr;
       Offset = 0;
     }
     bool hasInfo() { return F != nullptr; }
-    SMLoc Loc;
-    MCFragment *F;
-    uint64_t Offset;
-    ElfMappingSymbol State;
+    MCDataFragment *F = nullptr;
+    uint64_t Offset = 0;
+    ElfMappingSymbol State = EMS_None;
   };
 
   void emitDataMappingSymbol() {
@@ -537,8 +644,7 @@ private:
       auto *DF = dyn_cast_or_null<MCDataFragment>(getCurrentFragment());
       if (!DF)
         return;
-      EMS->Loc = SMLoc();
-      EMS->F = getCurrentFragment();
+      EMS->F = DF;
       EMS->Offset = DF->getContents().size();
       LastEMSInfo->State = EMS_Data;
       return;
@@ -564,19 +670,16 @@ private:
   }
 
   void EmitMappingSymbol(StringRef Name) {
-    auto *Symbol = cast<MCSymbolELF>(getContext().getOrCreateSymbol(
-        Name + "." + Twine(MappingSymbolCounter++)));
+    auto *Symbol = cast<MCSymbolELF>(getContext().createLocalSymbol(Name));
     emitLabel(Symbol);
 
     Symbol->setType(ELF::STT_NOTYPE);
     Symbol->setBinding(ELF::STB_LOCAL);
   }
 
-  void EmitMappingSymbol(StringRef Name, SMLoc Loc, MCFragment *F,
-                         uint64_t Offset) {
-    auto *Symbol = cast<MCSymbolELF>(getContext().getOrCreateSymbol(
-        Name + "." + Twine(MappingSymbolCounter++)));
-    emitLabelAtPos(Symbol, Loc, F, Offset);
+  void emitMappingSymbol(StringRef Name, MCDataFragment &F, uint64_t Offset) {
+    auto *Symbol = cast<MCSymbolELF>(getContext().createLocalSymbol(Name));
+    emitLabelAtPos(Symbol, SMLoc(), F, Offset);
     Symbol->setType(ELF::STT_NOTYPE);
     Symbol->setBinding(ELF::STB_LOCAL);
   }
@@ -605,7 +708,6 @@ private:
 
   bool IsThumb;
   bool IsAndroid;
-  int64_t MappingSymbolCounter = 0;
 
   DenseMap<const MCSection *, std::unique_ptr<ElfMappingSymbolInfo>>
       LastMappingSymbols;
@@ -725,10 +827,6 @@ void ARMTargetELFStreamer::emitArchDefaultAttributes() {
     S.setAttributeItem(CPU_arch, ARM::getArchAttr(EmittedArch), false);
 
   switch (Arch) {
-  case ARM::ArchKind::ARMV2:
-  case ARM::ArchKind::ARMV2A:
-  case ARM::ArchKind::ARMV3:
-  case ARM::ArchKind::ARMV3M:
   case ARM::ArchKind::ARMV4:
     S.setAttributeItem(ARM_ISA_use, Allowed, false);
     break;
@@ -783,10 +881,15 @@ void ARMTargetELFStreamer::emitArchDefaultAttributes() {
   case ARM::ArchKind::ARMV8_4A:
   case ARM::ArchKind::ARMV8_5A:
   case ARM::ArchKind::ARMV8_6A:
+  case ARM::ArchKind::ARMV8_7A:
+  case ARM::ArchKind::ARMV8_8A:
+  case ARM::ArchKind::ARMV8_9A:
   case ARM::ArchKind::ARMV9A:
   case ARM::ArchKind::ARMV9_1A:
   case ARM::ArchKind::ARMV9_2A:
   case ARM::ArchKind::ARMV9_3A:
+  case ARM::ArchKind::ARMV9_4A:
+  case ARM::ArchKind::ARMV9_5A:
     S.setAttributeItem(CPU_arch_profile, ApplicationProfile, false);
     S.setAttributeItem(ARM_ISA_use, Allowed, false);
     S.setAttributeItem(THUMB_ISA_use, AllowThumb32, false);
@@ -818,9 +921,7 @@ void ARMTargetELFStreamer::emitArchDefaultAttributes() {
   }
 }
 
-void ARMTargetELFStreamer::emitFPU(unsigned Value) {
-  FPU = Value;
-}
+void ARMTargetELFStreamer::emitFPU(ARM::FPUKind Value) { FPU = Value; }
 
 void ARMTargetELFStreamer::emitFPUDefaultAttributes() {
   ARMELFStreamer &S = getStreamer();
@@ -984,8 +1085,8 @@ void ARMTargetELFStreamer::emitLabel(MCSymbol *Symbol) {
     Streamer.emitThumbFunc(Symbol);
 }
 
-void
-ARMTargetELFStreamer::AnnotateTLSDescriptorSequence(const MCSymbolRefExpr *S) {
+void ARMTargetELFStreamer::annotateTLSDescriptorSequence(
+    const MCSymbolRefExpr *S) {
   getStreamer().EmitFixup(S, FK_Data_4);
 }
 
@@ -1008,26 +1109,22 @@ void ARMTargetELFStreamer::emitInst(uint32_t Inst, char Suffix) {
 
 void ARMTargetELFStreamer::reset() { AttributeSection = nullptr; }
 
-void ARMELFStreamer::finishImpl() {
-  MCTargetStreamer &TS = *getTargetStreamer();
-  ARMTargetStreamer &ATS = static_cast<ARMTargetStreamer &>(TS);
-  ATS.finishAttributeSection();
-
-  MCELFStreamer::finishImpl();
+void ARMTargetELFStreamer::finish() {
+  ARMTargetStreamer::finish();
+  finishAttributeSection();
 }
 
 void ARMELFStreamer::reset() {
   MCTargetStreamer &TS = *getTargetStreamer();
   ARMTargetStreamer &ATS = static_cast<ARMTargetStreamer &>(TS);
   ATS.reset();
-  MappingSymbolCounter = 0;
   MCELFStreamer::reset();
   LastMappingSymbols.clear();
   LastEMSInfo.reset();
   // MCELFStreamer clear's the assembler's e_flags. However, for
   // arm we manually set the ABI version on streamer creation, so
   // do the same here
-  getAssembler().setELFHeaderEFlags(ELF::EF_ARM_EABI_VER5);
+  getWriter().setELFHeaderEFlags(ELF::EF_ARM_EABI_VER5);
 }
 
 inline void ARMELFStreamer::SwitchToEHSection(StringRef Prefix,
@@ -1057,8 +1154,8 @@ inline void ARMELFStreamer::SwitchToEHSection(StringRef Prefix,
   assert(EHSection && "Failed to get the required EH section");
 
   // Switch to .ARM.extab or .ARM.exidx section
-  SwitchSection(EHSection);
-  emitValueToAlignment(4, 0, 1, 0);
+  switchSection(EHSection);
+  emitValueToAlignment(Align(4), 0, 1, 0);
 }
 
 inline void ARMELFStreamer::SwitchToExTabSection(const MCSymbol &FnStart) {
@@ -1150,7 +1247,7 @@ void ARMELFStreamer::emitFnEnd() {
   }
 
   // Switch to the section containing FnStart
-  SwitchSection(&FnStart->getSection());
+  switchSection(&FnStart->getSection());
 
   // Clean exception handling frame information
   EHReset();
@@ -1360,39 +1457,31 @@ namespace llvm {
 
 MCTargetStreamer *createARMTargetAsmStreamer(MCStreamer &S,
                                              formatted_raw_ostream &OS,
-                                             MCInstPrinter *InstPrint,
-                                             bool isVerboseAsm) {
-  return new ARMTargetAsmStreamer(S, OS, *InstPrint, isVerboseAsm);
+                                             MCInstPrinter *InstPrint) {
+  return new ARMTargetAsmStreamer(S, OS, *InstPrint);
 }
 
 MCTargetStreamer *createARMNullTargetStreamer(MCStreamer &S) {
   return new ARMTargetStreamer(S);
 }
 
-MCTargetStreamer *createARMObjectTargetStreamer(MCStreamer &S,
-                                                const MCSubtargetInfo &STI) {
-  const Triple &TT = STI.getTargetTriple();
-  if (TT.isOSBinFormatELF())
-    return new ARMTargetELFStreamer(S);
-  return new ARMTargetStreamer(S);
+MCTargetStreamer *createARMObjectTargetELFStreamer(MCStreamer &S) {
+  return new ARMTargetELFStreamer(S);
 }
 
 MCELFStreamer *createARMELFStreamer(MCContext &Context,
                                     std::unique_ptr<MCAsmBackend> TAB,
                                     std::unique_ptr<MCObjectWriter> OW,
                                     std::unique_ptr<MCCodeEmitter> Emitter,
-                                    bool RelaxAll, bool IsThumb,
-                                    bool IsAndroid) {
+                                    bool IsThumb, bool IsAndroid) {
   ARMELFStreamer *S =
       new ARMELFStreamer(Context, std::move(TAB), std::move(OW),
                          std::move(Emitter), IsThumb, IsAndroid);
   // FIXME: This should eventually end up somewhere else where more
   // intelligent flag decisions can be made. For now we are just maintaining
   // the status quo for ARM and setting EF_ARM_EABI_VER5 as the default.
-  S->getAssembler().setELFHeaderEFlags(ELF::EF_ARM_EABI_VER5);
+  S->getWriter().setELFHeaderEFlags(ELF::EF_ARM_EABI_VER5);
 
-  if (RelaxAll)
-    S->getAssembler().setRelaxAll(true);
   return S;
 }
 

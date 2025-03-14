@@ -41,8 +41,8 @@ sites are:
   }
   ```
 
-  For method calls, the receiver (`self` parameter) can only take advantage
-  of [unsized coercions](#unsized-coercions).
+  For method calls, the receiver (`self` parameter) type is coerced
+  differently, see the documentation on [method-call expressions] for details.
 
 * Instantiations of struct, union, or enum variant fields
 
@@ -180,7 +180,7 @@ an implementation of `Unsize<U>` for `T` will be provided:
     * T is not part of the type of any other fields.
 
 Additionally, a type `Foo<T>` can implement `CoerceUnsized<Foo<U>>` when `T`
-implements `Unsize<U>` or `CoerceUnsized<Foo<U>>`. This allows it to provide a
+implements `Unsize<U>` or `CoerceUnsized<Foo<U>>`. This allows it to provide an
 unsized coercion to `Foo<U>`.
 
 > Note: While the definition of the unsized coercions and their implementation
@@ -271,5 +271,6 @@ precisely.
 [subtype]: subtyping.md
 [object safe]: items/traits.md#object-safety
 [type cast operator]: expressions/operator-expr.md#type-cast-expressions
-[`Unsize`]: ../std/marker/trait.Unsize.html
-[`CoerceUnsized`]: ../std/ops/trait.CoerceUnsized.html
+[`Unsize`]: std::marker::Unsize
+[`CoerceUnsized`]: std::ops::CoerceUnsized
+[method-call expressions]: expressions/method-call-expr.md

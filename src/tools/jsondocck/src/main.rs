@@ -1,9 +1,10 @@
+use std::borrow::Cow;
+use std::sync::OnceLock;
+use std::{env, fmt, fs};
+
 use jsonpath_lib::select;
-use once_cell::sync::Lazy;
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
-use std::borrow::Cow;
-use std::{env, fmt, fs};
 
 mod cache;
 mod config;
@@ -17,7 +18,7 @@ fn main() -> Result<(), String> {
     let config = parse_config(env::args().collect());
 
     let mut failed = Vec::new();
-    let mut cache = Cache::new(&config.doc_dir);
+    let mut cache = Cache::new(&config);
     let commands = get_commands(&config.template)
         .map_err(|_| format!("Jsondocck failed for {}", &config.template))?;
 
@@ -50,30 +51,35 @@ pub enum CommandKind {
     Has,
     Count,
     Is,
+    IsMany,
     Set,
 }
 
 impl CommandKind {
-    fn validate(&self, args: &[String], command_num: usize, lineno: usize) -> bool {
+    fn validate(&self, args: &[String], lineno: usize) -> bool {
+        // FIXME(adotinthevoid): We should "parse, don't validate" here, so we avoid ad-hoc
+        // indexing in check_command.
         let count = match self {
-            CommandKind::Has => (1..=3).contains(&args.len()),
-            CommandKind::Count | CommandKind::Is => 3 == args.len(),
-            CommandKind::Set => 4 == args.len(),
+            CommandKind::Has => (1..=2).contains(&args.len()),
+            CommandKind::IsMany => args.len() >= 2,
+            CommandKind::Count | CommandKind::Is => 2 == args.len(),
+            CommandKind::Set => 3 == args.len(),
         };
 
         if !count {
-            print_err(&format!("Incorrect number of arguments to `@{}`", self), lineno);
-            return false;
-        }
-
-        if args[0] == "-" && command_num == 0 {
-            print_err(&format!("Tried to use the previous path in the first command"), lineno);
+            print_err(&format!("Incorrect number of arguments to `{}`", self), lineno);
             return false;
         }
 
         if let CommandKind::Count = self {
-            if args[2].parse::<usize>().is_err() {
-                print_err(&format!("Third argument to @count must be a valid usize"), lineno);
+            if args[1].parse::<usize>().is_err() {
+                print_err(
+                    &format!(
+                        "Second argument to `count` must be a valid usize (got `{}`)",
+                        args[1]
+                    ),
+                    lineno,
+                );
                 return false;
             }
         }
@@ -86,6 +92,7 @@ impl fmt::Display for CommandKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             CommandKind::Has => "has",
+            CommandKind::IsMany => "ismany",
             CommandKind::Count => "count",
             CommandKind::Is => "is",
             CommandKind::Set => "set",
@@ -94,10 +101,12 @@ impl fmt::Display for CommandKind {
     }
 }
 
-static LINE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static LINE_PATTERN: OnceLock<Regex> = OnceLock::new();
+fn line_pattern() -> Regex {
     RegexBuilder::new(
         r#"
-        \s(?P<invalid>!?)@(?P<negated>!?)
+        //@\s+
+        (?P<negated>!?)
         (?P<cmd>[A-Za-z]+(?:-[A-Za-z]+)*)
         (?P<args>.*)$
     "#,
@@ -106,11 +115,15 @@ static LINE_PATTERN: Lazy<Regex> = Lazy::new(|| {
     .unicode(true)
     .build()
     .unwrap()
-});
+}
 
 fn print_err(msg: &str, lineno: usize) {
     eprintln!("Invalid command: {} on line {}", msg, lineno)
 }
+
+// FIXME: This setup is temporary until we figure out how to improve this situation.
+//        See <https://github.com/rust-lang/rust/issues/125813#issuecomment-2141953780>.
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../compiletest/src/command-list.rs"));
 
 /// Get a list of commands from a file. Does the work of ensuring the commands
 /// are syntactically valid.
@@ -122,40 +135,27 @@ fn get_commands(template: &str) -> Result<Vec<Command>, ()> {
     for (lineno, line) in file.split('\n').enumerate() {
         let lineno = lineno + 1;
 
-        let cap = match LINE_PATTERN.captures(line) {
+        let cap = match LINE_PATTERN.get_or_init(line_pattern).captures(line) {
             Some(c) => c,
             None => continue,
         };
 
         let negated = cap.name("negated").unwrap().as_str() == "!";
-        let cmd = cap.name("cmd").unwrap().as_str();
 
-        let cmd = match cmd {
+        let cmd = match cap.name("cmd").unwrap().as_str() {
             "has" => CommandKind::Has,
             "count" => CommandKind::Count,
             "is" => CommandKind::Is,
+            "ismany" => CommandKind::IsMany,
             "set" => CommandKind::Set,
-            _ => {
-                print_err(&format!("Unrecognized command name `@{}`", cmd), lineno);
+            // FIXME: See the comment above the `include!(...)`.
+            cmd if KNOWN_DIRECTIVE_NAMES.contains(&cmd) => continue,
+            cmd => {
+                print_err(&format!("Unrecognized command name `{cmd}`"), lineno);
                 errors = true;
                 continue;
             }
         };
-
-        if let Some(m) = cap.name("invalid") {
-            if m.as_str() == "!" {
-                print_err(
-                    &format!(
-                        "`!@{0}{1}`, (help: try with `@!{1}`)",
-                        if negated { "!" } else { "" },
-                        cmd,
-                    ),
-                    lineno,
-                );
-                errors = true;
-                continue;
-            }
-        }
 
         let args = cap.name("args").map_or(Some(vec![]), |m| shlex::split(m.as_str()));
 
@@ -174,7 +174,7 @@ fn get_commands(template: &str) -> Result<Vec<Command>, ()> {
             }
         };
 
-        if !cmd.validate(&args, commands.len(), lineno) {
+        if !cmd.validate(&args, lineno) {
             errors = true;
             continue;
         }
@@ -192,26 +192,24 @@ fn check_command(command: Command, cache: &mut Cache) -> Result<(), CkError> {
     let result = match command.kind {
         CommandKind::Has => {
             match command.args.len() {
-                // @has <path> = file existence
-                1 => cache.get_file(&command.args[0]).is_ok(),
-                // @has <path> <jsonpath> = check path exists
-                2 => {
-                    let val = cache.get_value(&command.args[0])?;
-                    let results = select(&val, &command.args[1]).unwrap();
+                // `has <jsonpath>`: Check that `jsonpath` exists.
+                1 => {
+                    let val = cache.value();
+                    let results = select(val, &command.args[0]).unwrap();
                     !results.is_empty()
                 }
-                // @has <path> <jsonpath> <value> = check *any* item matched by path equals value
-                3 => {
-                    let val = cache.get_value(&command.args[0])?;
-                    let results = select(&val, &command.args[1]).unwrap();
-                    let pat = string_to_value(&command.args[2], cache);
+                // `has <jsonpath> <value>`: Check *any* item matched by `jsonpath` equals `value`.
+                2 => {
+                    let val = cache.value().clone();
+                    let results = select(&val, &command.args[0]).unwrap();
+                    let pat = string_to_value(&command.args[1], cache);
                     let has = results.contains(&pat.as_ref());
-                    // Give better error for when @has check fails
+                    // Give better error for when `has` check fails.
                     if !command.negated && !has {
                         return Err(CkError::FailedCheck(
                             format!(
                                 "{} matched to {:?} but didn't have {:?}",
-                                &command.args[1],
+                                &command.args[0],
                                 results,
                                 pat.as_ref()
                             ),
@@ -224,19 +222,56 @@ fn check_command(command: Command, cache: &mut Cache) -> Result<(), CkError> {
                 _ => unreachable!(),
             }
         }
-        CommandKind::Count => {
-            // @count <path> <jsonpath> <count> = Check that the jsonpath matches exactly [count] times
-            assert_eq!(command.args.len(), 3);
-            let expected: usize = command.args[2].parse().unwrap();
+        // `ismany <path> <jsonpath> <value...>`
+        CommandKind::IsMany => {
+            assert!(!command.negated, "`ismany` may not be negated");
+            let (query, values) = if let [query, values @ ..] = &command.args[..] {
+                (query, values)
+            } else {
+                unreachable!("Checked in CommandKind::validate")
+            };
+            let val = cache.value();
+            let got_values = select(val, &query).unwrap();
 
-            let val = cache.get_value(&command.args[0])?;
-            let results = select(&val, &command.args[1]).unwrap();
+            // Serde json doesn't implement Ord or Hash for Value, so we must
+            // use a Vec here. While in theory that makes setwize equality
+            // O(n^2), in practice n will never be large enough to matter.
+            let expected_values =
+                values.iter().map(|v| string_to_value(v, cache)).collect::<Vec<_>>();
+            if expected_values.len() != got_values.len() {
+                return Err(CkError::FailedCheck(
+                    format!(
+                        "Expected {} values, but `{}` matched to {} values ({:?})",
+                        expected_values.len(),
+                        query,
+                        got_values.len(),
+                        got_values
+                    ),
+                    command,
+                ));
+            };
+            for got_value in got_values {
+                if !expected_values.iter().any(|exp| &**exp == got_value) {
+                    return Err(CkError::FailedCheck(
+                        format!("`{}` has match {:?}, which was not expected", query, got_value),
+                        command,
+                    ));
+                }
+            }
+            true
+        }
+        // `count <jsonpath> <count>`: Check that `jsonpath` matches exactly `count` times.
+        CommandKind::Count => {
+            assert_eq!(command.args.len(), 2);
+            let expected: usize = command.args[1].parse().unwrap();
+            let val = cache.value();
+            let results = select(val, &command.args[0]).unwrap();
             let eq = results.len() == expected;
             if !command.negated && !eq {
                 return Err(CkError::FailedCheck(
                     format!(
                         "`{}` matched to `{:?}` with length {}, but expected length {}",
-                        &command.args[1],
+                        &command.args[0],
                         results,
                         results.len(),
                         expected
@@ -247,18 +282,18 @@ fn check_command(command: Command, cache: &mut Cache) -> Result<(), CkError> {
                 eq
             }
         }
+        // `has <jsonpath> <value>`: Check` *exactly one* item matched by `jsonpath`, and it equals `value`.
         CommandKind::Is => {
-            // @has <path> <jsonpath> <value> = check *exactly one* item matched by path, and it equals value
-            assert_eq!(command.args.len(), 3);
-            let val = cache.get_value(&command.args[0])?;
-            let results = select(&val, &command.args[1]).unwrap();
-            let pat = string_to_value(&command.args[2], cache);
+            assert_eq!(command.args.len(), 2);
+            let val = cache.value().clone();
+            let results = select(&val, &command.args[0]).unwrap();
+            let pat = string_to_value(&command.args[1], cache);
             let is = results.len() == 1 && results[0] == pat.as_ref();
             if !command.negated && !is {
                 return Err(CkError::FailedCheck(
                     format!(
                         "{} matched to {:?}, but expected {:?}",
-                        &command.args[1],
+                        &command.args[0],
                         results,
                         pat.as_ref()
                     ),
@@ -268,17 +303,18 @@ fn check_command(command: Command, cache: &mut Cache) -> Result<(), CkError> {
                 is
             }
         }
+        // `set <name> = <jsonpath>`
         CommandKind::Set => {
-            // @set <name> = <path> <jsonpath>
-            assert_eq!(command.args.len(), 4);
+            assert!(!command.negated, "`set` may not be negated");
+            assert_eq!(command.args.len(), 3);
             assert_eq!(command.args[1], "=", "Expected an `=`");
-            let val = cache.get_value(&command.args[2])?;
-            let results = select(&val, &command.args[3]).unwrap();
+            let val = cache.value().clone();
+            let results = select(&val, &command.args[2]).unwrap();
             assert_eq!(
                 results.len(),
                 1,
-                "Didn't get 1 result for `{}`: got {:?}",
-                command.args[3],
+                "Expected 1 match for `{}` (because of `set`): matched to {:?}",
+                command.args[2],
                 results
             );
             match results.len() {
@@ -290,8 +326,8 @@ fn check_command(command: Command, cache: &mut Cache) -> Result<(), CkError> {
                 }
                 _ => {
                     panic!(
-                        "Got multiple results in `@set` for `{}`: {:?}",
-                        &command.args[3], results
+                        "Got multiple results in `set` for `{}`: {:?}",
+                        &command.args[2], results,
                     );
                 }
             }
@@ -301,18 +337,14 @@ fn check_command(command: Command, cache: &mut Cache) -> Result<(), CkError> {
     if result == command.negated {
         if command.negated {
             Err(CkError::FailedCheck(
-                format!(
-                    "`@!{} {}` matched when it shouldn't",
-                    command.kind,
-                    command.args.join(" ")
-                ),
+                format!("`!{} {}` matched when it shouldn't", command.kind, command.args.join(" ")),
                 command,
             ))
         } else {
             // FIXME: In the future, try 'peeling back' each step, and see at what level the match failed
             Err(CkError::FailedCheck(
                 format!(
-                    "`@{} {}` didn't match when it should",
+                    "`{} {}` didn't match when it should",
                     command.kind,
                     command.args.join(" ")
                 ),

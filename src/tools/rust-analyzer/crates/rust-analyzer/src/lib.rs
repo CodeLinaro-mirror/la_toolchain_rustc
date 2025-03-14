@@ -8,70 +8,56 @@
 //!
 //! The `cli` submodule implements some batch-processing analysis, primarily as
 //! a debugging aid.
-#![recursion_limit = "512"]
 
 pub mod cli;
 
-#[allow(unused)]
-macro_rules! eprintln {
-    ($($tt:tt)*) => { stdx::eprintln!($($tt)*) };
+mod command;
+mod diagnostics;
+mod discover;
+mod flycheck;
+mod hack_recover_crate_name;
+mod line_index;
+mod main_loop;
+mod mem_docs;
+mod op_queue;
+mod reload;
+mod target_spec;
+mod task_pool;
+mod test_runner;
+mod version;
+
+mod handlers {
+    pub(crate) mod dispatch;
+    pub(crate) mod notification;
+    pub(crate) mod request;
 }
 
-mod global_state;
-mod reload;
-mod main_loop;
-mod dispatch;
-mod handlers;
-mod caps;
-mod cargo_target_spec;
-mod to_proto;
-mod from_proto;
-mod semantic_tokens;
-mod markdown;
-mod diagnostics;
-mod line_index;
-mod lsp_utils;
-mod thread_pool;
-mod mem_docs;
-mod diff;
-mod op_queue;
-pub mod lsp_ext;
+pub mod tracing {
+    pub mod config;
+    pub mod json;
+    pub use config::Config;
+    pub mod hprof;
+}
+
 pub mod config;
+mod global_state;
+pub mod lsp;
+use self::lsp::ext as lsp_ext;
 
 #[cfg(test)]
 mod integrated_benchmarks;
 
-use std::fmt;
-
 use serde::de::DeserializeOwned;
 
-pub use crate::{caps::server_capabilities, main_loop::main_loop};
+pub use crate::{
+    lsp::capabilities::server_capabilities, main_loop::main_loop, reload::ws_to_crate_graph,
+    version::version,
+};
 
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-pub fn from_json<T: DeserializeOwned>(what: &'static str, json: serde_json::Value) -> Result<T> {
-    let res = serde_json::from_value(json.clone())
-        .map_err(|e| format!("Failed to deserialize {}: {}; {}", what, e, json))?;
-    Ok(res)
+pub fn from_json<T: DeserializeOwned>(
+    what: &'static str,
+    json: &serde_json::Value,
+) -> anyhow::Result<T> {
+    serde_json::from_value(json.clone())
+        .map_err(|e| anyhow::format_err!("Failed to deserialize {what}: {e}; {json}"))
 }
-
-#[derive(Debug)]
-struct LspError {
-    code: i32,
-    message: String,
-}
-
-impl LspError {
-    fn new(code: i32, message: String) -> LspError {
-        LspError { code, message }
-    }
-}
-
-impl fmt::Display for LspError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Language Server request failed with {}. ({})", self.code, self.message)
-    }
-}
-
-impl std::error::Error for LspError {}

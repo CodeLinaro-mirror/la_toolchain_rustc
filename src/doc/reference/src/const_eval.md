@@ -27,7 +27,7 @@ to be run.
 * [Tuple expressions].
 * [Array expressions].
 * [Struct] expressions.
-* [Block expressions], including `unsafe` blocks.
+* [Block expressions], including `unsafe` and `const` blocks.
     * [let statements] and thus irrefutable [patterns], including mutable bindings
     * [assignment expressions]
     * [compound assignment expressions]
@@ -38,18 +38,21 @@ to be run.
 * [Closure expressions] which don't capture variables from the environment.
 * Built-in [negation], [arithmetic], [logical], [comparison] or [lazy boolean]
   operators used on integer and floating point types, `bool`, and `char`.
-* Shared [borrow]s, except if applied to a type with [interior mutability].
-* The [dereference operator] except for raw pointers.
+* All forms of [borrow]s, including raw borrows, with one limitation:
+  mutable borrows and shared borrows to values with interior mutability
+  are only allowed to refer to *transient* places. A place is *transient*
+  if its lifetime is strictly contained inside the current [const context].
+* The [dereference operator].
 * [Grouped] expressions.
 * [Cast] expressions, except
-  * pointer to address casts,
-  * function pointer to address casts, and
-  * unsizing casts to trait objects.
+  * pointer to address casts and
+  * function pointer to address casts.
 * Calls of [const functions] and const methods.
 * [loop], [while] and [`while let`] expressions.
 * [if], [`if let`] and [match] expressions.
 
 ## Const context
+[const context]: #const-context
 
 A _const context_ is one of the following:
 
@@ -60,44 +63,25 @@ A _const context_ is one of the following:
   * [statics]
   * [enum discriminants]
 * A [const generic argument]
+* A [const block]
+
+Const contexts that are used as parts of types (array type and repeat length
+expressions as well as const generic arguments) can only make restricted use of
+surrounding generic parameters: such an expression must either be a single bare
+const generic parameter, or an arbitrary expression not making use of any
+generics.
 
 ## Const Functions
 
 A _const fn_ is a function that one is permitted to call from a const context. Declaring a function
 `const` has no effect on any existing uses, it only restricts the types that arguments and the
-return type may use, as well as prevent various expressions from being used within it. You can freely do anything with a const function that
-you can do with a regular function.
+return type may use, and restricts the function body to constant expressions.
 
 When called from a const context, the function is interpreted by the
 compiler at compile time. The interpretation happens in the
 environment of the compilation target and not the host. So `usize` is
 `32` bits if you are compiling against a `32` bit system, irrelevant
 of whether you are building on a `64` bit or a `32` bit system.
-
-Const functions have various restrictions to make sure that they can be
-evaluated at compile-time. It is, for example, not possible to write a random
-number generator as a const function. Calling a const function at compile-time
-will always yield the same result as calling it at runtime, even when called
-multiple times. There's one exception to this rule: if you are doing complex
-floating point operations in extreme situations, then you might get (very
-slightly) different results. It is advisable to not make array lengths and enum
-discriminants depend on floating point computations.
-
-
-Notable features that const contexts have, but const fn haven't are:
-
-* floating point operations
-  * floating point values are treated just like generic parameters without trait bounds beyond
-  `Copy`. So you cannot do anything with them but copy/move them around.
-* `dyn Trait` types
-* generic bounds on generic parameters beyond `Sized`
-* comparing raw pointers
-* union field access
-
-Conversely, the following are possible in a const function, but not in a const context:
-
-* Use of generic type and lifetime parameters.
-  * Const contexts do allow limited use of [const generic parameters].
 
 [arithmetic]:           expressions/operator-expr.md#arithmetic-and-logical-binary-operators
 [array expressions]:    expressions/array-expr.md
@@ -111,6 +95,7 @@ Conversely, the following are possible in a const function, but not in a const c
 [cast]:                 expressions/operator-expr.md#type-cast-expressions
 [closure expressions]:  expressions/closure-expr.md
 [comparison]:           expressions/operator-expr.md#comparison-operators
+[const block]:          expressions/block-expr.md#const-blocks
 [const functions]:      items/functions.md#const-functions
 [const generic argument]: items/generics.md#const-generics
 [const generic parameters]: items/generics.md#const-generics
@@ -118,7 +103,7 @@ Conversely, the following are possible in a const function, but not in a const c
 [Const parameters]:     items/generics.md
 [dereference operator]: expressions/operator-expr.md#the-dereference-operator
 [destructors]:          destructors.md
-[enum discriminants]:   items/enumerations.md#custom-discriminant-values-for-fieldless-enumerations
+[enum discriminants]:   items/enumerations.md#discriminants
 [expression statements]: statements.md#expression-statements
 [expressions]:          expressions.md
 [field]:                expressions/field-expr.md

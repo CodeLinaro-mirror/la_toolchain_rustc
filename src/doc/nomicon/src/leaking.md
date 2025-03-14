@@ -134,10 +134,10 @@ impl<T> Rc<T> {
             // Wouldn't it be nice if heap::allocate worked like this?
             let ptr = heap::allocate::<RcBox<T>>();
             ptr::write(ptr, RcBox {
-                data: data,
+                data,
                 ref_count: 1,
             });
-            Rc { ptr: ptr }
+            Rc { ptr }
         }
     }
 
@@ -179,8 +179,8 @@ horribly degenerate. Also *oh my gosh* it's such a ridiculous corner case.
 > Note: This API has already been removed from std, for more information
 > you may refer [issue #24292](https://github.com/rust-lang/rust/issues/24292).
 >
-> We still remain this chapter here because we think this example is still
-> important, regardless of if it is still in std.
+> This section remains here because we think this example is still
+> important, regardless of whether it is part of std or not.
 
 The thread::scoped API intended to allow threads to be spawned that reference
 data on their parent's stack without any synchronization over that data by
@@ -194,7 +194,7 @@ pub fn scoped<'a, F>(f: F) -> JoinGuard<'a>
 ```
 
 Here `f` is some closure for the other thread to execute. Saying that
-`F: Send +'a` is saying that it closes over data that lives for `'a`, and it
+`F: Send + 'a` is saying that it closes over data that lives for `'a`, and it
 either owns that data or the data was Sync (implying `&data` is Send).
 
 Because JoinGuard has a lifetime, it keeps all the data it closes over

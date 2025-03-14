@@ -82,8 +82,10 @@ impl<T> Drop for IntoIter<T> {
     }
 }
 
-impl<T> Vec<T> {
-    pub fn into_iter(self) -> IntoIter<T> {
+impl<T> IntoIterator for Vec<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+    fn into_iter(self) -> IntoIter<T> {
         unsafe {
             let iter = RawValIter::new(&self);
 
@@ -91,7 +93,7 @@ impl<T> Vec<T> {
             mem::forget(self);
 
             IntoIter {
-                iter: iter,
+                iter,
                 _buf: buf,
             }
         }
@@ -133,18 +135,16 @@ impl<'a, T> Drop for Drain<'a, T> {
 
 impl<T> Vec<T> {
     pub fn drain(&mut self) -> Drain<T> {
-        unsafe {
-            let iter = RawValIter::new(&self);
+        let iter = unsafe { RawValIter::new(&self) };
 
-            // this is a mem::forget safety thing. If Drain is forgotten, we just
-            // leak the whole Vec's contents. Also we need to do this *eventually*
-            // anyway, so why not do it now?
-            self.len = 0;
+        // this is a mem::forget safety thing. If Drain is forgotten, we just
+        // leak the whole Vec's contents. Also we need to do this *eventually*
+        // anyway, so why not do it now?
+        self.len = 0;
 
-            Drain {
-                iter: iter,
-                vec: PhantomData,
-            }
+        Drain {
+            iter,
+            vec: PhantomData,
         }
     }
 }

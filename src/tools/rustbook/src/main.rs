@@ -1,64 +1,102 @@
-use clap::crate_version;
-
 use std::env;
 use std::path::{Path, PathBuf};
 
-use clap::{App, AppSettings, ArgMatches, SubCommand};
-
-use mdbook::errors::Result as Result3;
+use clap::{ArgMatches, Command, arg, crate_version};
 use mdbook::MDBook;
+use mdbook::errors::Result as Result3;
+use mdbook_i18n_helpers::preprocessors::Gettext;
+use mdbook_spec::Spec;
+use mdbook_trpl_listing::TrplListing;
+use mdbook_trpl_note::TrplNote;
 
 fn main() {
+    let crate_version = concat!("v", crate_version!());
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    let d_message = "-d, --dest-dir=[dest-dir]
-'The output directory for your book{n}(Defaults to ./book when omitted)'";
-    let dir_message = "[dir]
-'A directory for your book{n}(Defaults to Current Directory when omitted)'";
+    let d_arg = arg!(-d --"dest-dir" <DEST_DIR>
+"The output directory for your book\n(Defaults to ./book when omitted)")
+    .required(false)
+    .value_parser(clap::value_parser!(PathBuf));
 
-    let matches = App::new("rustbook")
+    let l_arg = arg!(-l --"lang" <LANGUAGE>
+"The output language")
+    .required(false)
+    .value_parser(clap::value_parser!(String));
+
+    let dir_arg = arg!([dir] "Root directory for the book\n\
+                              (Defaults to the current directory when omitted)")
+    .value_parser(clap::value_parser!(PathBuf));
+
+    let matches = Command::new("rustbook")
         .about("Build a book with mdBook")
         .author("Steve Klabnik <steve@steveklabnik.com>")
-        .version(&*format!("v{}", crate_version!()))
-        .setting(AppSettings::SubcommandRequired)
+        .version(crate_version)
+        .subcommand_required(true)
+        .arg_required_else_help(true)
         .subcommand(
-            SubCommand::with_name("build")
+            Command::new("build")
                 .about("Build the book from the markdown files")
-                .arg_from_usage(d_message)
-                .arg_from_usage(dir_message),
+                .arg(d_arg)
+                .arg(l_arg)
+                .arg(&dir_arg),
         )
         .subcommand(
-            SubCommand::with_name("test")
+            Command::new("test")
                 .about("Tests that a book's Rust code samples compile")
-                .arg_from_usage(dir_message),
+                .arg(dir_arg),
         )
         .get_matches();
 
     // Check which subcomamnd the user ran...
     match matches.subcommand() {
-        ("build", Some(sub_matches)) => {
+        Some(("build", sub_matches)) => {
             if let Err(e) = build(sub_matches) {
                 handle_error(e);
             }
         }
-        ("test", Some(sub_matches)) => {
+        Some(("test", sub_matches)) => {
             if let Err(e) = test(sub_matches) {
                 handle_error(e);
             }
         }
-        (_, _) => unreachable!(),
+        _ => unreachable!(),
     };
 }
 
 // Build command implementation
-pub fn build(args: &ArgMatches<'_>) -> Result3<()> {
+pub fn build(args: &ArgMatches) -> Result3<()> {
     let book_dir = get_book_dir(args);
     let mut book = load_book(&book_dir)?;
+
+    if let Some(lang) = args.get_one::<String>("lang") {
+        let gettext = Gettext;
+        book.with_preprocessor(gettext);
+        book.config.set("book.language", lang).unwrap();
+    }
 
     // Set this to allow us to catch bugs in advance.
     book.config.build.create_missing = false;
 
-    if let Some(dest_dir) = args.value_of("dest-dir") {
-        book.config.build.build_dir = PathBuf::from(dest_dir);
+    if let Some(dest_dir) = args.get_one::<PathBuf>("dest-dir") {
+        book.config.build.build_dir = dest_dir.into();
+    }
+
+    // NOTE: Replacing preprocessors using this technique causes error
+    // messages to be displayed when the original preprocessor doesn't work
+    // (but it otherwise succeeds).
+    //
+    // This should probably be fixed in mdbook to remove the existing
+    // preprocessor, or this should modify the config and use
+    // MDBook::load_with_config.
+    if book.config.get_preprocessor("trpl-note").is_some() {
+        book.with_preprocessor(TrplNote);
+    }
+
+    if book.config.get_preprocessor("trpl-listing").is_some() {
+        book.with_preprocessor(TrplListing);
+    }
+
+    if book.config.get_preprocessor("spec").is_some() {
+        book.with_preprocessor(Spec::new());
     }
 
     book.build()?;
@@ -66,17 +104,16 @@ pub fn build(args: &ArgMatches<'_>) -> Result3<()> {
     Ok(())
 }
 
-fn test(args: &ArgMatches<'_>) -> Result3<()> {
+fn test(args: &ArgMatches) -> Result3<()> {
     let book_dir = get_book_dir(args);
     let mut book = load_book(&book_dir)?;
     book.test(vec![])
 }
 
-fn get_book_dir(args: &ArgMatches<'_>) -> PathBuf {
-    if let Some(dir) = args.value_of("dir") {
+fn get_book_dir(args: &ArgMatches) -> PathBuf {
+    if let Some(p) = args.get_one::<PathBuf>("dir") {
         // Check if path is relative from current dir, or absolute...
-        let p = Path::new(dir);
-        if p.is_relative() { env::current_dir().unwrap().join(dir) } else { p.to_path_buf() }
+        if p.is_relative() { env::current_dir().unwrap().join(p) } else { p.to_path_buf() }
     } else {
         env::current_dir().unwrap()
     }

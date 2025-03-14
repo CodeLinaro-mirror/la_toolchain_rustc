@@ -7,6 +7,7 @@ extern crate syn;
 use proc_macro::TokenStream;
 use std::{fs::File, io::Read, path::Path};
 use syn::ext::IdentExt;
+use syn::parse::Parser as _;
 
 #[proc_macro]
 pub fn x86_functions(input: TokenStream) -> TokenStream {
@@ -69,7 +70,7 @@ fn functions(input: TokenStream, dirs: &[&str]) -> TokenStream {
     }
     assert!(!tests.is_empty());
 
-    functions.retain(|&(ref f, _)| {
+    functions.retain(|(f, _)| {
         if let syn::Visibility::Public(_) = f.vis {
             if f.sig.unsafety.is_some() {
                 return true;
@@ -85,22 +86,22 @@ fn functions(input: TokenStream, dirs: &[&str]) -> TokenStream {
         .iter()
         .map(|&(ref f, path)| {
             let name = &f.sig.ident;
-            // println!("{}", name);
+            // println!("{name}");
             let mut arguments = Vec::new();
             let mut const_arguments = Vec::new();
             for input in f.sig.inputs.iter() {
                 let ty = match *input {
                     syn::FnArg::Typed(ref c) => &c.ty,
-                    _ => panic!("invalid argument on {}", name),
+                    _ => panic!("invalid argument on {name}"),
                 };
                 arguments.push(to_type(ty));
             }
             for generic in f.sig.generics.params.iter() {
-                let ty = match *generic {
-                    syn::GenericParam::Const(ref c) => &c.ty,
-                    _ => panic!("invalid generic argument on {}", name),
+                match *generic {
+                    syn::GenericParam::Const(ref c) => const_arguments.push(to_type(&c.ty)),
+                    syn::GenericParam::Type(ref _t) => (),
+                    _ => panic!("invalid generic argument on {name}"),
                 };
-                const_arguments.push(to_type(ty));
             }
             let ret = match f.sig.output {
                 syn::ReturnType::Default => quote! { None },
@@ -144,12 +145,14 @@ fn functions(input: TokenStream, dirs: &[&str]) -> TokenStream {
 
             // strip leading underscore from fn name when building a test
             // _mm_foo -> mm_foo such that the test name is test_mm_foo.
-            let test_name_string = format!("{}", name);
+            let test_name_string = format!("{name}");
             let mut test_name_id = test_name_string.as_str();
             while test_name_id.starts_with('_') {
                 test_name_id = &test_name_id[1..];
             }
-            let has_test = tests.contains(&format!("test_{}", test_name_id));
+            let has_test = tests.contains(&format!("test_{test_name_id}"));
+
+            let doc = find_doc(&f.attrs);
 
             quote! {
                 Function {
@@ -161,13 +164,14 @@ fn functions(input: TokenStream, dirs: &[&str]) -> TokenStream {
                     file: stringify!(#path),
                     required_const: &[#(#required_const),*],
                     has_test: #has_test,
+                    doc: #doc
                 }
             }
         })
         .collect::<Vec<_>>();
 
     let ret = quote! { #input: &[Function] = &[#(#functions),*]; };
-    // println!("{}", ret);
+    // println!("{ret}");
     ret.into()
 }
 
@@ -178,14 +182,17 @@ fn to_type(t: &syn::Type) -> proc_macro2::TokenStream {
             "__m128" => quote! { &M128 },
             "__m128bh" => quote! { &M128BH },
             "__m128d" => quote! { &M128D },
+            "__m128h" => quote! { &M128H },
             "__m128i" => quote! { &M128I },
             "__m256" => quote! { &M256 },
             "__m256bh" => quote! { &M256BH },
             "__m256d" => quote! { &M256D },
+            "__m256h" => quote! { &M256H },
             "__m256i" => quote! { &M256I },
             "__m512" => quote! { &M512 },
             "__m512bh" => quote! { &M512BH },
             "__m512d" => quote! { &M512D },
+            "__m512h" => quote! { &M512H },
             "__m512i" => quote! { &M512I },
             "__mmask8" => quote! { &MMASK8 },
             "__mmask16" => quote! { &MMASK16 },
@@ -195,8 +202,9 @@ fn to_type(t: &syn::Type) -> proc_macro2::TokenStream {
             "_MM_MANTISSA_NORM_ENUM" => quote! { &MM_MANTISSA_NORM_ENUM },
             "_MM_MANTISSA_SIGN_ENUM" => quote! { &MM_MANTISSA_SIGN_ENUM },
             "_MM_PERM_ENUM" => quote! { &MM_PERM_ENUM },
-            "__m64" => quote! { &M64 },
             "bool" => quote! { &BOOL },
+            "bf16" => quote! { &BF16 },
+            "f16" => quote! { &F16 },
             "f32" => quote! { &F32 },
             "f64" => quote! { &F64 },
             "i16" => quote! { &I16 },
@@ -207,6 +215,7 @@ fn to_type(t: &syn::Type) -> proc_macro2::TokenStream {
             "u32" => quote! { &U32 },
             "u64" => quote! { &U64 },
             "u128" => quote! { &U128 },
+            "usize" => quote! { &USIZE },
             "u8" => quote! { &U8 },
             "p8" => quote! { &P8 },
             "p16" => quote! { &P16 },
@@ -336,7 +345,11 @@ fn to_type(t: &syn::Type) -> proc_macro2::TokenStream {
             "v4f32" => quote! { &v4f32 },
             "v2f64" => quote! { &v2f64 },
 
-            s => panic!("unsupported type: \"{}\"", s),
+            // Generic types
+            "T" => quote! { &GENERICT },
+            "U" => quote! { &GENERICU },
+
+            s => panic!("unsupported type: \"{s}\""),
         },
         syn::Type::Ptr(syn::TypePtr {
             ref elem,
@@ -350,11 +363,11 @@ fn to_type(t: &syn::Type) -> proc_macro2::TokenStream {
         }) => {
             // Both pointers and references can have a mut token (*mut and &mut)
             if mutability.is_some() {
-                let tokens = to_type(&elem);
+                let tokens = to_type(elem);
                 quote! { &Type::MutPtr(#tokens) }
             } else {
                 // If they don't (*const or &) then they are "const"
-                let tokens = to_type(&elem);
+                let tokens = to_type(elem);
                 quote! { &Type::ConstPtr(#tokens) }
             }
         }
@@ -416,7 +429,7 @@ fn walk(root: &Path, files: &mut Vec<(syn::File, String)>) {
 
 fn find_instrs(attrs: &[syn::Attribute]) -> Vec<String> {
     struct AssertInstr {
-        instr: String,
+        instr: Option<String>,
     }
 
     // A small custom parser to parse out the instruction in `assert_instr`.
@@ -424,15 +437,21 @@ fn find_instrs(attrs: &[syn::Attribute]) -> Vec<String> {
     // TODO: should probably just reuse `Invoc` from the `assert-instr-macro`
     // crate.
     impl syn::parse::Parse for AssertInstr {
-        fn parse(content: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-            let input;
-            parenthesized!(input in content);
-            let _ = input.parse::<syn::Meta>()?;
-            let _ = input.parse::<Token![,]>()?;
-            let ident = input.parse::<syn::Ident>()?;
-            if ident != "assert_instr" {
-                return Err(input.error("expected `assert_instr`"));
+        fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+            let _ = input.parse::<syn::Meta>().unwrap();
+            let _ = input.parse::<Token![,]>().unwrap();
+
+            match input.parse::<syn::Ident>() {
+                Ok(ident) if ident == "assert_instr" => {}
+                _ => {
+                    while !input.is_empty() {
+                        // consume everything
+                        drop(input.parse::<proc_macro2::TokenStream>());
+                    }
+                    return Ok(Self { instr: None });
+                }
             }
+
             let instrs;
             parenthesized!(instrs in input);
 
@@ -452,18 +471,24 @@ fn find_instrs(attrs: &[syn::Attribute]) -> Vec<String> {
                     return Err(input.error("failed to parse instruction"));
                 }
             }
-            Ok(Self { instr })
+            Ok(Self { instr: Some(instr) })
         }
     }
 
     attrs
         .iter()
-        .filter(|a| a.path.is_ident("cfg_attr"))
         .filter_map(|a| {
-            syn::parse2::<AssertInstr>(a.tokens.clone())
-                .ok()
-                .map(|a| a.instr)
+            if let syn::Meta::List(ref l) = a.meta {
+                if l.path.is_ident("cfg_attr") {
+                    Some(l)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         })
+        .filter_map(|l| syn::parse2::<AssertInstr>(l.tokens.clone()).unwrap().instr)
         .collect()
 }
 
@@ -471,31 +496,63 @@ fn find_target_feature(attrs: &[syn::Attribute]) -> Option<syn::Lit> {
     attrs
         .iter()
         .flat_map(|a| {
-            if let Ok(a) = a.parse_meta() {
-                if let syn::Meta::List(i) = a {
-                    if i.path.is_ident("target_feature") {
-                        return i.nested;
+            if let syn::Meta::List(ref l) = a.meta {
+                if l.path.is_ident("target_feature") {
+                    if let Ok(l) =
+                        syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated
+                            .parse2(l.tokens.clone())
+                    {
+                        return l;
                     }
                 }
             }
             syn::punctuated::Punctuated::new()
         })
-        .filter_map(|nested| match nested {
-            syn::NestedMeta::Meta(m) => Some(m),
-            syn::NestedMeta::Lit(_) => None,
-        })
         .find_map(|m| match m {
-            syn::Meta::NameValue(ref i) if i.path.is_ident("enable") => Some(i.clone().lit),
+            syn::Meta::NameValue(i) if i.path.is_ident("enable") => {
+                if let syn::Expr::Lit(lit) = i.value {
+                    Some(lit.lit)
+                } else {
+                    None
+                }
+            }
             _ => None,
         })
+}
+
+fn find_doc(attrs: &[syn::Attribute]) -> String {
+    attrs
+        .iter()
+        .filter_map(|a| {
+            if let syn::Meta::NameValue(ref l) = a.meta {
+                if l.path.is_ident("doc") {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(ref s),
+                        ..
+                    }) = l.value
+                    {
+                        return Some(s.value());
+                    }
+                }
+            }
+            return None;
+        })
+        .collect()
 }
 
 fn find_required_const(name: &str, attrs: &[syn::Attribute]) -> Vec<usize> {
     attrs
         .iter()
-        .flat_map(|a| {
-            if a.path.segments[0].ident == name {
-                syn::parse::<RustcArgsRequiredConst>(a.tokens.clone().into())
+        .filter_map(|a| {
+            if let syn::Meta::List(ref l) = a.meta {
+                Some(l)
+            } else {
+                None
+            }
+        })
+        .flat_map(|l| {
+            if l.path.segments[0].ident == name {
+                syn::parse2::<RustcArgsRequiredConst>(l.tokens.clone())
                     .unwrap()
                     .args
             } else {
@@ -511,10 +568,7 @@ struct RustcArgsRequiredConst {
 
 impl syn::parse::Parse for RustcArgsRequiredConst {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        let content;
-        parenthesized!(content in input);
-        let list =
-            syn::punctuated::Punctuated::<syn::LitInt, Token![,]>::parse_terminated(&content)?;
+        let list = syn::punctuated::Punctuated::<syn::LitInt, Token![,]>::parse_terminated(input)?;
         Ok(Self {
             args: list
                 .into_iter()

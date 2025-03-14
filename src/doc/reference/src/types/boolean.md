@@ -30,7 +30,7 @@ Like all primitives, the boolean type [implements][p-impl] the
 [traits][p-traits] [`Clone`][p-clone], [`Copy`][p-copy], [`Sized`][p-sized],
 [`Send`][p-send], and [`Sync`][p-sync].
 
-> **Note**: See the [standard library docs][std] for library operations.
+> **Note**: See the [standard library docs](bool) for library operations.
 
 ## Operations on boolean values
 
@@ -92,6 +92,12 @@ boolean type for its operands, they evaluate using the rules of [boolean logic].
 * `a < b` is the same as `!(a >= b)`
 * `a <= b` is the same as `a == b | a < b`
 
+## Bit validity
+
+The single byte of a `bool` is guaranteed to be initialized (in other words,
+`transmute::<bool, u8>(...)` is always sound -- but since some bit patterns
+are invalid `bool`s, the inverse is not always sound).
+
 [boolean logic]: https://en.wikipedia.org/wiki/Boolean_algebra
 [enumerated type]: enum.md
 [expressions]: ../expressions.md
@@ -113,6 +119,5 @@ boolean type for its operands, they evaluate using the rules of [boolean logic].
 [p-sync]: ../special-types-and-traits.md#sync
 [p-traits]: ../items/traits.md
 [size and alignment]: ../type-layout.md#size-and-alignment
-[std]: ../../std/primitive.bool.html
 [undefined behavior]: ../behavior-considered-undefined.md
 [while expressions]: ../expressions/loop-expr.md#predicate-loops

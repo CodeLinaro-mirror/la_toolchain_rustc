@@ -69,11 +69,11 @@ After you are happy with the state of the code, please use [interactive rebase](
 Avoid @mentioning people in commit messages and pull request descriptions(they are added to commit message by bors).
 Such messages create a lot of duplicate notification traffic during rebases.
 
-If possible, write commit messages from user's perspective:
+If possible, write Pull Request titles and descriptions from the user's perspective:
 
 ```
 # GOOD
-Goto definition works inside macros
+Make goto definition work inside macros
 
 # BAD
 Use original span for FileId
@@ -99,14 +99,7 @@ Including a description and GIF suitable for the changelog means less work for t
 
 ## Clippy
 
-We don't enforce Clippy.
-A number of default lints have high false positive rate.
-Selectively patching false-positives with `allow(clippy)` is considered worse than not using Clippy at all.
-There's a `cargo lint` command which runs a subset of low-FPR lints.
-Careful tweaking of `lint` is welcome.
-Of course, applying Clippy suggestions is welcome as long as they indeed improve the code.
-
-**Rationale:** see [rust-lang/clippy#5537](https://github.com/rust-lang/rust-clippy/issues/5537).
+We use Clippy to improve the code, but if some lints annoy you, allow them in the [Cargo.toml](../../Cargo.toml) [workspace.lints.clippy] section.
 
 # Code
 
@@ -281,7 +274,7 @@ fn f() {
 Assert liberally.
 Prefer [`stdx::never!`](https://docs.rs/always-assert/0.1.2/always_assert/macro.never.html) to standard `assert!`.
 
-**Rationale:** See [cross cutting concern: error handling](https://github.com/rust-analyzer/rust-analyzer/blob/master/docs/dev/architecture.md#error-handling).
+**Rationale:** See [cross cutting concern: error handling](https://github.com/rust-lang/rust-analyzer/blob/master/docs/dev/architecture.md#error-handling).
 
 ## Getters & Setters
 
@@ -840,7 +833,7 @@ Context-first works better when non-context parameter is a lambda.
 
 ## Variable Naming
 
-Use boring and long names for local variables ([yay code completion](https://github.com/rust-analyzer/rust-analyzer/pull/4162#discussion_r417130973)).
+Use boring and long names for local variables ([yay code completion](https://github.com/rust-lang/rust-analyzer/pull/4162#discussion_r417130973)).
 The default name is a lowercased name of the type: `global_state: GlobalState`.
 Avoid ad-hoc acronyms and contractions, but use the ones that exist consistently (`db`, `ctx`, `acc`).
 Prefer American spelling (color, behavior).
@@ -868,6 +861,19 @@ type   -> ty
 ```
 
 **Rationale:** consistency.
+
+## Error Handling Trivia
+
+Use `anyhow::Result` rather than just `Result`.
+
+**Rationale:** makes it immediately clear what result that is.
+
+Use `anyhow::format_err!` rather than `anyhow::anyhow`.
+
+**Rationale:** consistent, boring, avoids stuttering.
+
+There's no specific guidance on the formatting of error messages, see [anyhow/#209](https://github.com/dtolnay/anyhow/issues/209).
+Do not end error and context messages with `.` though. 
 
 ## Early Returns
 
@@ -971,7 +977,7 @@ Between `ref` and mach ergonomics, the latter is more ergonomic in most cases, a
 
 ## Empty Match Arms
 
-Ues `=> (),` when a match arm is intentionally empty:
+Use `=> (),` when a match arm is intentionally empty:
 
 ```rust
 // GOOD
@@ -1036,7 +1042,7 @@ Having the result type specified up-front helps with understanding what the chai
 
 ## Helper Functions
 
-Avoid creating singe-use helper functions:
+Avoid creating single-use helper functions:
 
 ```rust
 // GOOD

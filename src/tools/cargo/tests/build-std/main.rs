@@ -13,12 +13,15 @@
 //! not catching any regressions that `tests/testsuite/standard_lib.rs` isn't
 //! already catching.
 //!
-//! All tests here should use `#[cargo_test(build_std)]` to indicate that
+//! All tests here should use `#[cargo_test(build_std_real)]` to indicate that
 //! boilerplate should be generated to require the nightly toolchain and the
 //! `CARGO_RUN_BUILD_STD_TESTS` env var to be set to actually run these tests.
 //! Otherwise the tests are skipped.
 
-use cargo_test_support::*;
+#![allow(clippy::disallowed_methods)]
+
+use cargo_test_support::prelude::*;
+use cargo_test_support::{basic_manifest, paths, project, rustc_host, str, Execs};
 use std::env;
 use std::path::Path;
 
@@ -31,8 +34,8 @@ fn enable_build_std(e: &mut Execs, arg: Option<&str>) {
         Some(s) => format!("-Zbuild-std={}", s),
         None => "-Zbuild-std".to_string(),
     };
-    e.arg(arg);
-    e.masquerade_as_nightly_cargo();
+    e.arg(arg).arg("-Zpublic-dependency");
+    e.masquerade_as_nightly_cargo(&["build-std"]);
 }
 
 // Helper methods used in the tests below
@@ -59,7 +62,7 @@ impl BuildStd for Execs {
     }
 }
 
-#[cargo_test(build_std)]
+#[cargo_test(build_std_real)]
 fn basic() {
     let p = project()
         .file(
@@ -110,13 +113,37 @@ fn basic() {
         .target_host()
         // Importantly, this should not say [UPDATING]
         // There have been multiple bugs where every build triggers and update.
-        .with_stderr(
-            "[COMPILING] foo v0.0.1 [..]\n\
-             [FINISHED] dev [..]",
-        )
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
-    p.cargo("run").build_std().target_host().run();
-    p.cargo("test").build_std().target_host().run();
+    p.cargo("run")
+        .build_std()
+        .target_host()
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/[HOST_TARGET]/debug/foo`
+
+"#]])
+        .run();
+    p.cargo("test")
+        .build_std()
+        .target_host()
+        .with_stderr_data(str![[r#"
+[COMPILING] rustc-std-workspace-std [..]
+...
+[COMPILING] test v0.0.0 ([..])
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] unittests src/lib.rs (target/[HOST_TARGET]/debug/deps/foo-[HASH])
+[RUNNING] unittests src/main.rs (target/[HOST_TARGET]/debug/deps/foo-[HASH])
+[RUNNING] tests/smoke.rs (target/[HOST_TARGET]/debug/deps/smoke-[HASH])
+[DOCTEST] foo
+
+"#]])
+        .run();
 
     // Check for hack that removes dylibs.
     let deps_dir = Path::new("target")
@@ -127,7 +154,7 @@ fn basic() {
     assert_eq!(p.glob(deps_dir.join("*.dylib")).count(), 0);
 }
 
-#[cargo_test(build_std)]
+#[cargo_test(build_std_real)]
 fn cross_custom() {
     let p = project()
         .file(
@@ -153,7 +180,7 @@ fn cross_custom() {
             r#"
             {
                 "llvm-target": "x86_64-unknown-none-gnu",
-                "data-layout": "e-m:e-i64:64-f80:128-n8:16:32:64-S128",
+                "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
                 "arch": "x86_64",
                 "target-endian": "little",
                 "target-pointer-width": "64",
@@ -170,7 +197,7 @@ fn cross_custom() {
         .run();
 }
 
-#[cargo_test(build_std)]
+#[cargo_test(build_std_real)]
 fn custom_test_framework() {
     let p = project()
         .file(
@@ -194,7 +221,7 @@ fn custom_test_framework() {
             r#"
             {
                 "llvm-target": "x86_64-unknown-none-gnu",
-                "data-layout": "e-m:e-i64:64-f80:128-n8:16:32:64-S128",
+                "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
                 "arch": "x86_64",
                 "target-endian": "little",
                 "target-pointer-width": "64",
@@ -225,5 +252,51 @@ fn custom_test_framework() {
     p.cargo("test --target target.json --no-run -v")
         .env("PATH", new_path)
         .build_std_arg("core")
+        .run();
+}
+
+// Fixing rust-lang/rust#117839.
+// on macOS it never gets remapped.
+// Might be a separate issue, so only run on Linux.
+#[cargo_test(build_std_real)]
+#[cfg(target_os = "linux")]
+fn remap_path_scope() {
+    let p = project()
+        .file(
+            "src/main.rs",
+            "
+                fn main() {
+                    panic!(\"remap to /rustc/<hash>\");
+                }
+            ",
+        )
+        .file(
+            ".cargo/config.toml",
+            "
+                [profile.release]
+                debug = \"line-tables-only\"
+            ",
+        )
+        .build();
+
+    p.cargo("run --release -Ztrim-paths")
+        .masquerade_as_nightly_cargo(&["-Ztrim-paths"])
+        .env("RUST_BACKTRACE", "1")
+        .build_std()
+        .target_host()
+        .with_status(101)
+        .with_stderr_data(
+            str![[r#"
+[FINISHED] `release` profile [optimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/[HOST_TARGET]/release/foo`
+[..]thread '[..]' panicked at [..]src/main.rs:3:[..]:
+[..]remap to /rustc/<hash>[..]
+[..]at /rustc/[..]/library/std/src/[..]
+[..]at ./src/main.rs:3:[..]
+[..]at /rustc/[..]/library/core/src/[..]
+...
+"#]]
+            .unordered(),
+        )
         .run();
 }

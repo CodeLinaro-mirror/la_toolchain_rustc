@@ -1,299 +1,670 @@
-use either::Either;
-use hir::{known, Callable, HasVisibility, HirDisplay, Semantics, TypeInfo};
-use ide_db::{base_db::FileRange, helpers::FamousDefs, RootDatabase};
-use itertools::Itertools;
-use stdx::to_lower_snake_case;
-use syntax::{
-    ast::{self, AstNode, HasArgList, HasName, UnaryOp},
-    match_ast, Direction, NodeOrToken, SmolStr, SyntaxKind, TextRange, T,
+use std::{
+    fmt::{self, Write},
+    mem::take,
 };
 
-use crate::FileId;
+use either::Either;
+use hir::{
+    sym, ClosureStyle, HasVisibility, HirDisplay, HirDisplayError, HirWrite, ModuleDef,
+    ModuleDefId, Semantics,
+};
+use ide_db::{famous_defs::FamousDefs, FileRange, RootDatabase};
+use itertools::Itertools;
+use smallvec::{smallvec, SmallVec};
+use span::{Edition, EditionedFileId};
+use stdx::never;
+use syntax::{
+    ast::{self, AstNode, HasGenericParams},
+    format_smolstr, match_ast, SmolStr, SyntaxNode, TextRange, TextSize, WalkEvent,
+};
+use text_edit::TextEdit;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InlayHintsConfig {
-    pub type_hints: bool,
-    pub parameter_hints: bool,
-    pub chaining_hints: bool,
-    pub hide_named_constructor_hints: bool,
-    pub max_length: Option<usize>,
-}
+use crate::{navigation_target::TryToNav, FileId};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InlayKind {
-    TypeHint,
-    ParameterHint,
-    ChainingHint,
-}
-
-#[derive(Debug)]
-pub struct InlayHint {
-    pub range: TextRange,
-    pub kind: InlayKind,
-    pub label: SmolStr,
-}
+mod adjustment;
+mod bind_pat;
+mod binding_mode;
+mod chaining;
+mod closing_brace;
+mod closure_captures;
+mod closure_ret;
+mod discriminant;
+mod generic_param;
+mod implicit_drop;
+mod implicit_static;
+mod lifetime;
+mod param_name;
+mod range_exclusive;
 
 // Feature: Inlay Hints
 //
 // rust-analyzer shows additional information inline with the source code.
 // Editors usually render this using read-only virtual text snippets interspersed with code.
 //
-// rust-analyzer shows hints for
+// rust-analyzer by default shows hints for
 //
 // * types of local variables
 // * names of function arguments
+// * names of const generic parameters
 // * types of chained expressions
 //
-// **Note:** VS Code does not have native support for inlay hints https://github.com/microsoft/vscode/issues/16221[yet] and the hints are implemented using decorations.
-// This approach has limitations, the caret movement and bracket highlighting near the edges of the hint may be weird:
-// https://github.com/rust-analyzer/rust-analyzer/issues/1623[1], https://github.com/rust-analyzer/rust-analyzer/issues/3453[2].
+// Optionally, one can enable additional hints for
 //
-// |===
-// | Editor  | Action Name
+// * return types of closure expressions
+// * elided lifetimes
+// * compiler inserted reborrows
+// * names of generic type and lifetime parameters
 //
-// | VS Code | **Rust Analyzer: Toggle inlay hints*
-// |===
+// Note: inlay hints for function argument names are heuristically omitted to reduce noise and will not appear if
+// any of the
+// link:https://github.com/rust-lang/rust-analyzer/blob/6b8b8ff4c56118ddee6c531cde06add1aad4a6af/crates/ide/src/inlay_hints/param_name.rs#L92-L99[following criteria]
+// are met:
+//
+// * the parameter name is a suffix of the function's name
+// * the argument is a qualified constructing or call expression where the qualifier is an ADT
+// * exact argument<->parameter match(ignoring leading underscore) or parameter is a prefix/suffix
+//   of argument with _ splitting it off
+// * the parameter name starts with `ra_fixture`
+// * the parameter name is a
+// link:https://github.com/rust-lang/rust-analyzer/blob/6b8b8ff4c56118ddee6c531cde06add1aad4a6af/crates/ide/src/inlay_hints/param_name.rs#L200[well known name]
+// in a unary function
+// * the parameter name is a
+// link:https://github.com/rust-lang/rust-analyzer/blob/6b8b8ff4c56118ddee6c531cde06add1aad4a6af/crates/ide/src/inlay_hints/param_name.rs#L201[single character]
+// in a unary function
 //
 // image::https://user-images.githubusercontent.com/48062697/113020660-b5f98b80-917a-11eb-8d70-3be3fd558cdd.png[]
 pub(crate) fn inlay_hints(
     db: &RootDatabase,
     file_id: FileId,
+    range_limit: Option<TextRange>,
     config: &InlayHintsConfig,
 ) -> Vec<InlayHint> {
-    let _p = profile::span("inlay_hints");
+    let _p = tracing::info_span!("inlay_hints").entered();
     let sema = Semantics::new(db);
+    let file_id = sema
+        .attach_first_edition(file_id)
+        .unwrap_or_else(|| EditionedFileId::current_edition(file_id));
     let file = sema.parse(file_id);
     let file = file.syntax();
 
-    let mut res = Vec::new();
+    let mut acc = Vec::new();
 
-    for node in file.descendants() {
-        if let Some(expr) = ast::Expr::cast(node.clone()) {
-            get_chaining_hints(&mut res, &sema, config, &expr);
-            match expr {
-                ast::Expr::CallExpr(it) => {
-                    get_param_name_hints(&mut res, &sema, config, ast::Expr::from(it));
-                }
-                ast::Expr::MethodCallExpr(it) => {
-                    get_param_name_hints(&mut res, &sema, config, ast::Expr::from(it));
-                }
-                _ => (),
-            }
-        } else if let Some(it) = ast::IdentPat::cast(node.clone()) {
-            get_bind_pat_hints(&mut res, &sema, config, &it);
+    let Some(scope) = sema.scope(file) else {
+        return acc;
+    };
+    let famous_defs = FamousDefs(&sema, scope.krate());
+
+    let ctx = &mut InlayHintCtx::default();
+    let mut hints = |event| {
+        if let Some(node) = handle_event(ctx, event) {
+            hints(&mut acc, ctx, &famous_defs, config, file_id, node);
         }
+    };
+    let mut preorder = file.preorder();
+    while let Some(event) = preorder.next() {
+        // FIXME: This can miss some hints that require the parent of the range to calculate
+        if matches!((&event, range_limit), (WalkEvent::Enter(node), Some(range)) if range.intersect(node.text_range()).is_none())
+        {
+            preorder.skip_subtree();
+            continue;
+        }
+        hints(event);
     }
-    res
+    acc
 }
 
-fn get_chaining_hints(
-    acc: &mut Vec<InlayHint>,
-    sema: &Semantics<RootDatabase>,
+#[derive(Default)]
+struct InlayHintCtx {
+    lifetime_stacks: Vec<Vec<SmolStr>>,
+}
+
+pub(crate) fn inlay_hints_resolve(
+    db: &RootDatabase,
+    file_id: FileId,
+    resolve_range: TextRange,
+    hash: u64,
     config: &InlayHintsConfig,
-    expr: &ast::Expr,
-) -> Option<()> {
-    if !config.chaining_hints {
-        return None;
-    }
+    hasher: impl Fn(&InlayHint) -> u64,
+) -> Option<InlayHint> {
+    let _p = tracing::info_span!("inlay_hints_resolve").entered();
+    let sema = Semantics::new(db);
+    let file_id = sema
+        .attach_first_edition(file_id)
+        .unwrap_or_else(|| EditionedFileId::current_edition(file_id));
+    let file = sema.parse(file_id);
+    let file = file.syntax();
 
-    if matches!(expr, ast::Expr::RecordExpr(_)) {
-        return None;
-    }
+    let scope = sema.scope(file)?;
+    let famous_defs = FamousDefs(&sema, scope.krate());
+    let mut acc = Vec::new();
 
-    let descended = sema.descend_node_into_attributes(expr.clone()).pop();
-    let desc_expr = descended.as_ref().unwrap_or(expr);
-    let krate = sema.scope(desc_expr.syntax()).module().map(|it| it.krate());
-    let famous_defs = FamousDefs(sema, krate);
-
-    let mut tokens = expr
-        .syntax()
-        .siblings_with_tokens(Direction::Next)
-        .filter_map(NodeOrToken::into_token)
-        .filter(|t| match t.kind() {
-            SyntaxKind::WHITESPACE if !t.text().contains('\n') => false,
-            SyntaxKind::COMMENT => false,
-            _ => true,
-        });
-
-    // Chaining can be defined as an expression whose next sibling tokens are newline and dot
-    // Ignoring extra whitespace and comments
-    let next = tokens.next()?.kind();
-    if next == SyntaxKind::WHITESPACE {
-        let mut next_next = tokens.next()?.kind();
-        while next_next == SyntaxKind::WHITESPACE {
-            next_next = tokens.next()?.kind();
+    let ctx = &mut InlayHintCtx::default();
+    let mut hints = |event| {
+        if let Some(node) = handle_event(ctx, event) {
+            hints(&mut acc, ctx, &famous_defs, config, file_id, node);
         }
-        if next_next == T![.] {
-            let ty = sema.type_of_expr(desc_expr)?.original;
-            if ty.is_unknown() {
-                return None;
+    };
+
+    let mut preorder = file.preorder();
+    while let Some(event) = preorder.next() {
+        // FIXME: This can miss some hints that require the parent of the range to calculate
+        if matches!(&event, WalkEvent::Enter(node) if resolve_range.intersect(node.text_range()).is_none())
+        {
+            preorder.skip_subtree();
+            continue;
+        }
+        hints(event);
+    }
+    acc.into_iter().find(|hint| hasher(hint) == hash)
+}
+
+fn handle_event(ctx: &mut InlayHintCtx, node: WalkEvent<SyntaxNode>) -> Option<SyntaxNode> {
+    match node {
+        WalkEvent::Enter(node) => {
+            if let Some(node) = ast::AnyHasGenericParams::cast(node.clone()) {
+                let params = node
+                    .generic_param_list()
+                    .map(|it| {
+                        it.lifetime_params()
+                            .filter_map(|it| {
+                                it.lifetime().map(|it| format_smolstr!("{}", &it.text()[1..]))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ctx.lifetime_stacks.push(params);
             }
-            if matches!(expr, ast::Expr::PathExpr(_)) {
-                if let Some(hir::Adt::Struct(st)) = ty.as_adt() {
-                    if st.fields(sema.db).is_empty() {
-                        return None;
+            Some(node)
+        }
+        WalkEvent::Leave(n) => {
+            if ast::AnyHasGenericParams::can_cast(n.kind()) {
+                ctx.lifetime_stacks.pop();
+            }
+            None
+        }
+    }
+}
+
+// FIXME: At some point when our hir infra is fleshed out enough we should flip this and traverse the
+// HIR instead of the syntax tree.
+fn hints(
+    hints: &mut Vec<InlayHint>,
+    ctx: &mut InlayHintCtx,
+    famous_defs @ FamousDefs(sema, _): &FamousDefs<'_, '_>,
+    config: &InlayHintsConfig,
+    file_id: EditionedFileId,
+    node: SyntaxNode,
+) {
+    closing_brace::hints(hints, sema, config, file_id, node.clone());
+    if let Some(any_has_generic_args) = ast::AnyHasGenericArgs::cast(node.clone()) {
+        generic_param::hints(hints, sema, config, any_has_generic_args);
+    }
+
+    match_ast! {
+        match node {
+            ast::Expr(expr) => {
+                chaining::hints(hints, famous_defs, config, file_id, &expr);
+                adjustment::hints(hints, famous_defs, config, file_id, &expr);
+                match expr {
+                    ast::Expr::CallExpr(it) => param_name::hints(hints, famous_defs, config, file_id, ast::Expr::from(it)),
+                    ast::Expr::MethodCallExpr(it) => {
+                        param_name::hints(hints, famous_defs, config, file_id, ast::Expr::from(it))
                     }
+                    ast::Expr::ClosureExpr(it) => {
+                        closure_captures::hints(hints, famous_defs, config, file_id, it.clone());
+                        closure_ret::hints(hints, famous_defs, config, file_id, it)
+                    },
+                    ast::Expr::RangeExpr(it) => range_exclusive::hints(hints, famous_defs, config, file_id,  it),
+                    _ => Some(()),
                 }
+            },
+            ast::Pat(it) => {
+                binding_mode::hints(hints, famous_defs, config, file_id,  &it);
+                match it {
+                    ast::Pat::IdentPat(it) => {
+                        bind_pat::hints(hints, famous_defs, config, file_id, &it);
+                    }
+                    ast::Pat::RangePat(it) => {
+                        range_exclusive::hints(hints, famous_defs, config, file_id, it);
+                    }
+                    _ => {}
+                }
+                Some(())
+            },
+            ast::Item(it) => match it {
+                ast::Item::Fn(it) => {
+                    implicit_drop::hints(hints, famous_defs, config, file_id, &it);
+                    lifetime::fn_hints(hints, ctx, famous_defs, config, file_id, it)
+                },
+                // static type elisions
+                ast::Item::Static(it) => implicit_static::hints(hints, famous_defs, config, file_id, Either::Left(it)),
+                ast::Item::Const(it) => implicit_static::hints(hints, famous_defs, config, file_id, Either::Right(it)),
+                ast::Item::Enum(it) => discriminant::enum_hints(hints, famous_defs, config, file_id, it),
+                _ => None,
+            },
+            // FIXME: trait object type elisions
+            ast::Type(ty) => match ty {
+                ast::Type::FnPtrType(ptr) => lifetime::fn_ptr_hints(hints, ctx, famous_defs, config, file_id, ptr),
+                ast::Type::PathType(path) => lifetime::fn_path_hints(hints, ctx, famous_defs, config, file_id, path),
+                _ => Some(()),
+            },
+            _ => Some(()),
+        }
+    };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlayHintsConfig {
+    pub render_colons: bool,
+    pub type_hints: bool,
+    pub discriminant_hints: DiscriminantHints,
+    pub parameter_hints: bool,
+    pub generic_parameter_hints: GenericParameterHints,
+    pub chaining_hints: bool,
+    pub adjustment_hints: AdjustmentHints,
+    pub adjustment_hints_mode: AdjustmentHintsMode,
+    pub adjustment_hints_hide_outside_unsafe: bool,
+    pub closure_return_type_hints: ClosureReturnTypeHints,
+    pub closure_capture_hints: bool,
+    pub binding_mode_hints: bool,
+    pub implicit_drop_hints: bool,
+    pub lifetime_elision_hints: LifetimeElisionHints,
+    pub param_names_for_lifetime_elision_hints: bool,
+    pub hide_named_constructor_hints: bool,
+    pub hide_closure_initialization_hints: bool,
+    pub range_exclusive_hints: bool,
+    pub closure_style: ClosureStyle,
+    pub max_length: Option<usize>,
+    pub closing_brace_hints_min_lines: Option<usize>,
+    pub fields_to_resolve: InlayFieldsToResolve,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct InlayFieldsToResolve {
+    pub resolve_text_edits: bool,
+    pub resolve_hint_tooltip: bool,
+    pub resolve_label_tooltip: bool,
+    pub resolve_label_location: bool,
+    pub resolve_label_command: bool,
+}
+
+impl InlayFieldsToResolve {
+    pub const fn empty() -> Self {
+        Self {
+            resolve_text_edits: false,
+            resolve_hint_tooltip: false,
+            resolve_label_tooltip: false,
+            resolve_label_location: false,
+            resolve_label_command: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClosureReturnTypeHints {
+    Always,
+    WithBlock,
+    Never,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiscriminantHints {
+    Always,
+    Never,
+    Fieldless,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenericParameterHints {
+    pub type_hints: bool,
+    pub lifetime_hints: bool,
+    pub const_hints: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LifetimeElisionHints {
+    Always,
+    SkipTrivial,
+    Never,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdjustmentHints {
+    Always,
+    ReborrowOnly,
+    Never,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AdjustmentHintsMode {
+    Prefix,
+    Postfix,
+    PreferPrefix,
+    PreferPostfix,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum InlayKind {
+    Adjustment,
+    BindingMode,
+    Chaining,
+    ClosingBrace,
+    ClosureCapture,
+    Discriminant,
+    GenericParamList,
+    Lifetime,
+    Parameter,
+    GenericParameter,
+    Type,
+    Drop,
+    RangeExclusive,
+}
+
+#[derive(Debug, Hash)]
+pub enum InlayHintPosition {
+    Before,
+    After,
+}
+
+#[derive(Debug)]
+pub struct InlayHint {
+    /// The text range this inlay hint applies to.
+    pub range: TextRange,
+    pub position: InlayHintPosition,
+    pub pad_left: bool,
+    pub pad_right: bool,
+    /// The kind of this inlay hint.
+    pub kind: InlayKind,
+    /// The actual label to show in the inlay hint.
+    pub label: InlayHintLabel,
+    /// Text edit to apply when "accepting" this inlay hint.
+    pub text_edit: Option<TextEdit>,
+    /// Range to recompute inlay hints when trying to resolve for this hint. If this is none, the
+    /// hint does not support resolving.
+    pub resolve_parent: Option<TextRange>,
+}
+
+impl std::hash::Hash for InlayHint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.range.hash(state);
+        self.position.hash(state);
+        self.pad_left.hash(state);
+        self.pad_right.hash(state);
+        self.kind.hash(state);
+        self.label.hash(state);
+        self.text_edit.is_some().hash(state);
+    }
+}
+
+impl InlayHint {
+    fn closing_paren_after(kind: InlayKind, range: TextRange) -> InlayHint {
+        InlayHint {
+            range,
+            kind,
+            label: InlayHintLabel::from(")"),
+            text_edit: None,
+            position: InlayHintPosition::After,
+            pad_left: false,
+            pad_right: false,
+            resolve_parent: None,
+        }
+    }
+
+    fn opening_paren_before(kind: InlayKind, range: TextRange) -> InlayHint {
+        InlayHint {
+            range,
+            kind,
+            label: InlayHintLabel::from("("),
+            text_edit: None,
+            position: InlayHintPosition::Before,
+            pad_left: false,
+            pad_right: false,
+            resolve_parent: None,
+        }
+    }
+
+    pub fn needs_resolve(&self) -> Option<TextRange> {
+        self.resolve_parent.filter(|_| self.text_edit.is_some() || self.label.needs_resolve())
+    }
+}
+
+#[derive(Debug, Hash)]
+pub enum InlayTooltip {
+    String(String),
+    Markdown(String),
+}
+
+#[derive(Default, Hash)]
+pub struct InlayHintLabel {
+    pub parts: SmallVec<[InlayHintLabelPart; 1]>,
+}
+
+impl InlayHintLabel {
+    pub fn simple(
+        s: impl Into<String>,
+        tooltip: Option<InlayTooltip>,
+        linked_location: Option<FileRange>,
+    ) -> InlayHintLabel {
+        InlayHintLabel {
+            parts: smallvec![InlayHintLabelPart { text: s.into(), linked_location, tooltip }],
+        }
+    }
+
+    pub fn prepend_str(&mut self, s: &str) {
+        match &mut *self.parts {
+            [InlayHintLabelPart { text, linked_location: None, tooltip: None }, ..] => {
+                text.insert_str(0, s)
             }
-            acc.push(InlayHint {
-                range: expr.syntax().text_range(),
-                kind: InlayKind::ChainingHint,
-                label: hint_iterator(sema, &famous_defs, config, &ty).unwrap_or_else(|| {
-                    ty.display_truncated(sema.db, config.max_length).to_string().into()
-                }),
+            _ => self.parts.insert(
+                0,
+                InlayHintLabelPart { text: s.into(), linked_location: None, tooltip: None },
+            ),
+        }
+    }
+
+    pub fn append_str(&mut self, s: &str) {
+        match &mut *self.parts {
+            [.., InlayHintLabelPart { text, linked_location: None, tooltip: None }] => {
+                text.push_str(s)
+            }
+            _ => self.parts.push(InlayHintLabelPart {
+                text: s.into(),
+                linked_location: None,
+                tooltip: None,
+            }),
+        }
+    }
+
+    pub fn needs_resolve(&self) -> bool {
+        self.parts.iter().any(|part| part.linked_location.is_some() || part.tooltip.is_some())
+    }
+}
+
+impl From<String> for InlayHintLabel {
+    fn from(s: String) -> Self {
+        Self {
+            parts: smallvec![InlayHintLabelPart { text: s, linked_location: None, tooltip: None }],
+        }
+    }
+}
+
+impl From<&str> for InlayHintLabel {
+    fn from(s: &str) -> Self {
+        Self {
+            parts: smallvec![InlayHintLabelPart {
+                text: s.into(),
+                linked_location: None,
+                tooltip: None
+            }],
+        }
+    }
+}
+
+impl fmt::Display for InlayHintLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.parts.iter().map(|part| &part.text).format(""))
+    }
+}
+
+impl fmt::Debug for InlayHintLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(&self.parts).finish()
+    }
+}
+
+#[derive(Hash)]
+pub struct InlayHintLabelPart {
+    pub text: String,
+    /// Source location represented by this label part. The client will use this to fetch the part's
+    /// hover tooltip, and Ctrl+Clicking the label part will navigate to the definition the location
+    /// refers to (not necessarily the location itself).
+    /// When setting this, no tooltip must be set on the containing hint, or VS Code will display
+    /// them both.
+    pub linked_location: Option<FileRange>,
+    /// The tooltip to show when hovering over the inlay hint, this may invoke other actions like
+    /// hover requests to show.
+    pub tooltip: Option<InlayTooltip>,
+}
+
+impl fmt::Debug for InlayHintLabelPart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self { text, linked_location: None, tooltip: None } => text.fmt(f),
+            Self { text, linked_location, tooltip } => f
+                .debug_struct("InlayHintLabelPart")
+                .field("text", text)
+                .field("linked_location", linked_location)
+                .field(
+                    "tooltip",
+                    &tooltip.as_ref().map_or("", |it| match it {
+                        InlayTooltip::String(it) | InlayTooltip::Markdown(it) => it,
+                    }),
+                )
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InlayHintLabelBuilder<'a> {
+    db: &'a RootDatabase,
+    result: InlayHintLabel,
+    last_part: String,
+    location: Option<FileRange>,
+}
+
+impl fmt::Write for InlayHintLabelBuilder<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.last_part.write_str(s)
+    }
+}
+
+impl HirWrite for InlayHintLabelBuilder<'_> {
+    fn start_location_link(&mut self, def: ModuleDefId) {
+        never!(self.location.is_some(), "location link is already started");
+        self.make_new_part();
+        let Some(location) = ModuleDef::from(def).try_to_nav(self.db) else { return };
+        let location = location.call_site();
+        let location =
+            FileRange { file_id: location.file_id, range: location.focus_or_full_range() };
+        self.location = Some(location);
+    }
+
+    fn end_location_link(&mut self) {
+        self.make_new_part();
+    }
+}
+
+impl InlayHintLabelBuilder<'_> {
+    fn make_new_part(&mut self) {
+        let text = take(&mut self.last_part);
+        if !text.is_empty() {
+            self.result.parts.push(InlayHintLabelPart {
+                text,
+                linked_location: self.location.take(),
+                tooltip: None,
             });
         }
     }
-    Some(())
-}
 
-fn get_param_name_hints(
-    acc: &mut Vec<InlayHint>,
-    sema: &Semantics<RootDatabase>,
-    config: &InlayHintsConfig,
-    expr: ast::Expr,
-) -> Option<()> {
-    if !config.parameter_hints {
-        return None;
+    fn finish(mut self) -> InlayHintLabel {
+        self.make_new_part();
+        self.result
     }
-
-    let (callable, arg_list) = get_callable(sema, &expr)?;
-    let hints = callable
-        .params(sema.db)
-        .into_iter()
-        .zip(arg_list.args())
-        .filter_map(|((param, _ty), arg)| {
-            // Only annotate hints for expressions that exist in the original file
-            let range = sema.original_range_opt(arg.syntax())?;
-            let param_name = match param? {
-                Either::Left(_) => "self".to_string(),
-                Either::Right(pat) => match pat {
-                    ast::Pat::IdentPat(it) => it.name()?.to_string(),
-                    _ => return None,
-                },
-            };
-            Some((param_name, arg, range))
-        })
-        .filter(|(param_name, arg, _)| {
-            !should_hide_param_name_hint(sema, &callable, param_name, arg)
-        })
-        .map(|(param_name, _, FileRange { range, .. })| InlayHint {
-            range,
-            kind: InlayKind::ParameterHint,
-            label: param_name.into(),
-        });
-
-    acc.extend(hints);
-    Some(())
 }
 
-fn get_bind_pat_hints(
-    acc: &mut Vec<InlayHint>,
-    sema: &Semantics<RootDatabase>,
-    config: &InlayHintsConfig,
-    pat: &ast::IdentPat,
-) -> Option<()> {
-    if !config.type_hints {
-        return None;
-    }
-
-    let descended = sema.descend_node_into_attributes(pat.clone()).pop();
-    let desc_pat = descended.as_ref().unwrap_or(pat);
-    let ty = sema.type_of_pat(&desc_pat.clone().into())?.original;
-
-    if should_not_display_type_hint(sema, pat, &ty) {
-        return None;
-    }
-
-    let krate = sema.scope(desc_pat.syntax()).module().map(|it| it.krate());
-    let famous_defs = FamousDefs(sema, krate);
-    let label = hint_iterator(sema, &famous_defs, config, &ty);
-
-    let label = match label {
-        Some(label) => label,
-        None => {
-            let ty_name = ty.display_truncated(sema.db, config.max_length).to_string();
-            if config.hide_named_constructor_hints
-                && is_named_constructor(sema, pat, &ty_name).is_some()
-            {
-                return None;
-            }
-            ty_name.into()
-        }
-    };
-
-    acc.push(InlayHint {
-        range: match pat.name() {
-            Some(name) => name.syntax().text_range(),
-            None => pat.syntax().text_range(),
-        },
-        kind: InlayKind::TypeHint,
-        label,
-    });
-
-    Some(())
-}
-
-fn is_named_constructor(
-    sema: &Semantics<RootDatabase>,
-    pat: &ast::IdentPat,
-    ty_name: &str,
-) -> Option<()> {
-    let let_node = pat.syntax().parent()?;
-    let expr = match_ast! {
-        match let_node {
-            ast::LetStmt(it) => it.initializer(),
-            ast::Condition(it) => it.expr(),
-            _ => None,
-        }
-    }?;
-
-    let expr = sema.descend_node_into_attributes(expr.clone()).pop().unwrap_or(expr);
-    // unwrap postfix expressions
-    let expr = match expr {
-        ast::Expr::TryExpr(it) => it.expr(),
-        ast::Expr::AwaitExpr(it) => it.expr(),
-        expr => Some(expr),
-    }?;
-    let expr = match expr {
-        ast::Expr::CallExpr(call) => match call.expr()? {
-            ast::Expr::PathExpr(path) => path,
-            _ => return None,
-        },
-        ast::Expr::PathExpr(path) => path,
-        _ => return None,
-    };
-    let path = expr.path()?;
-
-    let callable = sema.type_of_expr(&ast::Expr::PathExpr(expr))?.original.as_callable(sema.db);
-    let callable_kind = callable.map(|it| it.kind());
-    let qual_seg = match callable_kind {
-        Some(hir::CallableKind::Function(_) | hir::CallableKind::TupleEnumVariant(_)) => {
-            path.qualifier()?.segment()
-        }
-        _ => path.segment(),
-    }?;
-
-    let ctor_name = match qual_seg.kind()? {
-        ast::PathSegmentKind::Name(name_ref) => {
-            match qual_seg.generic_arg_list().map(|it| it.generic_args()) {
-                Some(generics) => format!("{}<{}>", name_ref, generics.format(", ")),
-                None => name_ref.to_string(),
-            }
-        }
-        ast::PathSegmentKind::Type { type_ref: Some(ty), trait_ref: None } => ty.to_string(),
-        _ => return None,
-    };
-    (ctor_name == ty_name).then(|| ())
-}
-
-/// Checks if the type is an Iterator from std::iter and replaces its hint with an `impl Iterator<Item = Ty>`.
-fn hint_iterator(
-    sema: &Semantics<RootDatabase>,
-    famous_defs: &FamousDefs,
+fn label_of_ty(
+    famous_defs @ FamousDefs(sema, _): &FamousDefs<'_, '_>,
     config: &InlayHintsConfig,
     ty: &hir::Type,
-) -> Option<SmolStr> {
+    edition: Edition,
+) -> Option<InlayHintLabel> {
+    fn rec(
+        sema: &Semantics<'_, RootDatabase>,
+        famous_defs: &FamousDefs<'_, '_>,
+        mut max_length: Option<usize>,
+        ty: &hir::Type,
+        label_builder: &mut InlayHintLabelBuilder<'_>,
+        config: &InlayHintsConfig,
+        edition: Edition,
+    ) -> Result<(), HirDisplayError> {
+        let iter_item_type = hint_iterator(sema, famous_defs, ty);
+        match iter_item_type {
+            Some((iter_trait, item, ty)) => {
+                const LABEL_START: &str = "impl ";
+                const LABEL_ITERATOR: &str = "Iterator";
+                const LABEL_MIDDLE: &str = "<";
+                const LABEL_ITEM: &str = "Item";
+                const LABEL_MIDDLE2: &str = " = ";
+                const LABEL_END: &str = ">";
+
+                max_length = max_length.map(|len| {
+                    len.saturating_sub(
+                        LABEL_START.len()
+                            + LABEL_ITERATOR.len()
+                            + LABEL_MIDDLE.len()
+                            + LABEL_MIDDLE2.len()
+                            + LABEL_END.len(),
+                    )
+                });
+
+                label_builder.write_str(LABEL_START)?;
+                label_builder.start_location_link(ModuleDef::from(iter_trait).into());
+                label_builder.write_str(LABEL_ITERATOR)?;
+                label_builder.end_location_link();
+                label_builder.write_str(LABEL_MIDDLE)?;
+                label_builder.start_location_link(ModuleDef::from(item).into());
+                label_builder.write_str(LABEL_ITEM)?;
+                label_builder.end_location_link();
+                label_builder.write_str(LABEL_MIDDLE2)?;
+                rec(sema, famous_defs, max_length, &ty, label_builder, config, edition)?;
+                label_builder.write_str(LABEL_END)?;
+                Ok(())
+            }
+            None => ty
+                .display_truncated(sema.db, max_length, edition)
+                .with_closure_style(config.closure_style)
+                .write_to(label_builder),
+        }
+    }
+
+    let mut label_builder = InlayHintLabelBuilder {
+        db: sema.db,
+        last_part: String::new(),
+        location: None,
+        result: InlayHintLabel::default(),
+    };
+    let _ = rec(sema, famous_defs, config.max_length, ty, &mut label_builder, config, edition);
+    let r = label_builder.finish();
+    Some(r)
+}
+
+/// Checks if the type is an Iterator from std::iter and returns the iterator trait and the item type of the concrete iterator.
+fn hint_iterator(
+    sema: &Semantics<'_, RootDatabase>,
+    famous_defs: &FamousDefs<'_, '_>,
+    ty: &hir::Type,
+) -> Option<(hir::Trait, hir::TypeAlias, hir::Type)> {
     let db = sema.db;
     let strukt = ty.strip_references().as_adt()?;
     let krate = strukt.module(db).krate();
@@ -312,1460 +683,151 @@ fn hint_iterator(
 
     if ty.impls_trait(db, iter_trait, &[]) {
         let assoc_type_item = iter_trait.items(db).into_iter().find_map(|item| match item {
-            hir::AssocItem::TypeAlias(alias) if alias.name(db) == known::Item => Some(alias),
+            hir::AssocItem::TypeAlias(alias) if alias.name(db) == sym::Item.clone() => Some(alias),
             _ => None,
         })?;
         if let Some(ty) = ty.normalize_trait_assoc_type(db, &[], assoc_type_item) {
-            const LABEL_START: &str = "impl Iterator<Item = ";
-            const LABEL_END: &str = ">";
-
-            let ty_display = hint_iterator(sema, famous_defs, config, &ty)
-                .map(|assoc_type_impl| assoc_type_impl.to_string())
-                .unwrap_or_else(|| {
-                    ty.display_truncated(
-                        db,
-                        config
-                            .max_length
-                            .map(|len| len.saturating_sub(LABEL_START.len() + LABEL_END.len())),
-                    )
-                    .to_string()
-                });
-            return Some(format!("{}{}{}", LABEL_START, ty_display, LABEL_END).into());
+            return Some((iter_trait, assoc_type_item, ty));
         }
     }
 
     None
 }
 
-fn pat_is_enum_variant(db: &RootDatabase, bind_pat: &ast::IdentPat, pat_ty: &hir::Type) -> bool {
-    if let Some(hir::Adt::Enum(enum_data)) = pat_ty.as_adt() {
-        let pat_text = bind_pat.to_string();
-        enum_data
-            .variants(db)
-            .into_iter()
-            .map(|variant| variant.name(db).to_smol_str())
-            .any(|enum_name| enum_name == pat_text)
-    } else {
-        false
-    }
+fn ty_to_text_edit(
+    sema: &Semantics<'_, RootDatabase>,
+    node_for_hint: &SyntaxNode,
+    ty: &hir::Type,
+    offset_to_insert: TextSize,
+    prefix: String,
+) -> Option<TextEdit> {
+    let scope = sema.scope(node_for_hint)?;
+    // FIXME: Limit the length and bail out on excess somehow?
+    let rendered = ty.display_source_code(scope.db, scope.module().into(), false).ok()?;
+
+    let mut builder = TextEdit::builder();
+    builder.insert(offset_to_insert, prefix);
+    builder.insert(offset_to_insert, rendered);
+    Some(builder.finish())
 }
 
-fn should_not_display_type_hint(
-    sema: &Semantics<RootDatabase>,
-    bind_pat: &ast::IdentPat,
-    pat_ty: &hir::Type,
-) -> bool {
-    let db = sema.db;
-
-    if pat_ty.is_unknown() {
-        return true;
-    }
-
-    if let Some(hir::Adt::Struct(s)) = pat_ty.as_adt() {
-        if s.fields(db).is_empty() && s.name(db).to_smol_str() == bind_pat.to_string() {
-            return true;
-        }
-    }
-
-    for node in bind_pat.syntax().ancestors() {
-        match_ast! {
-            match node {
-                ast::LetStmt(it) => return it.ty().is_some(),
-                ast::Param(it) => return it.ty().is_some(),
-                ast::MatchArm(_it) => return pat_is_enum_variant(db, bind_pat, pat_ty),
-                ast::IfExpr(it) => {
-                    return it.condition().and_then(|condition| condition.pat()).is_some()
-                        && pat_is_enum_variant(db, bind_pat, pat_ty);
-                },
-                ast::WhileExpr(it) => {
-                    return it.condition().and_then(|condition| condition.pat()).is_some()
-                        && pat_is_enum_variant(db, bind_pat, pat_ty);
-                },
-                ast::ForExpr(it) => {
-                    // We *should* display hint only if user provided "in {expr}" and we know the type of expr (and it's not unit).
-                    // Type of expr should be iterable.
-                    return it.in_token().is_none() ||
-                        it.iterable()
-                            .and_then(|iterable_expr| sema.type_of_expr(&iterable_expr))
-                            .map(TypeInfo::original)
-                            .map_or(true, |iterable_ty| iterable_ty.is_unknown() || iterable_ty.is_unit())
-                },
-                _ => (),
-            }
-        }
-    }
-    false
-}
-
-fn should_hide_param_name_hint(
-    sema: &Semantics<RootDatabase>,
-    callable: &hir::Callable,
-    param_name: &str,
-    argument: &ast::Expr,
-) -> bool {
-    // These are to be tested in the `parameter_hint_heuristics` test
-    // hide when:
-    // - the parameter name is a suffix of the function's name
-    // - the argument is an enum whose name is equal to the parameter
-    // - exact argument<->parameter match(ignoring leading underscore) or parameter is a prefix/suffix
-    //   of argument with _ splitting it off
-    // - param starts with `ra_fixture`
-    // - param is a well known name in a unary function
-
-    let param_name = param_name.trim_start_matches('_');
-    if param_name.is_empty() {
-        return true;
-    }
-
-    if matches!(argument, ast::Expr::PrefixExpr(prefix) if prefix.op_kind() == Some(UnaryOp::Not)) {
-        return false;
-    }
-
-    let fn_name = match callable.kind() {
-        hir::CallableKind::Function(it) => Some(it.name(sema.db).to_smol_str()),
-        _ => None,
-    };
-    let fn_name = fn_name.as_deref();
-    is_param_name_suffix_of_fn_name(param_name, callable, fn_name)
-        || is_enum_name_similar_to_param_name(sema, argument, param_name)
-        || is_argument_similar_to_param_name(argument, param_name)
-        || param_name.starts_with("ra_fixture")
-        || (callable.n_params() == 1 && is_obvious_param(param_name))
-}
-
-fn is_argument_similar_to_param_name(argument: &ast::Expr, param_name: &str) -> bool {
-    // check whether param_name and argument are the same or
-    // whether param_name is a prefix/suffix of argument(split at `_`)
-    let argument = match get_string_representation(argument) {
-        Some(argument) => argument,
-        None => return false,
-    };
-
-    // std is honestly too panic happy...
-    let str_split_at = |str: &str, at| str.is_char_boundary(at).then(|| argument.split_at(at));
-
-    let param_name = param_name.trim_start_matches('_');
-    let argument = argument.trim_start_matches('_');
-
-    match str_split_at(argument, param_name.len()) {
-        Some((prefix, rest)) if prefix.eq_ignore_ascii_case(param_name) => {
-            return rest.is_empty() || rest.starts_with('_');
-        }
-        _ => (),
-    }
-    match argument.len().checked_sub(param_name.len()).and_then(|at| str_split_at(argument, at)) {
-        Some((rest, suffix)) if param_name.eq_ignore_ascii_case(suffix) => {
-            return rest.is_empty() || rest.ends_with('_');
-        }
-        _ => (),
-    }
-    false
-}
-
-/// Hide the parameter name of a unary function if it is a `_` - prefixed suffix of the function's name, or equal.
-///
-/// `fn strip_suffix(suffix)` will be hidden.
-/// `fn stripsuffix(suffix)` will not be hidden.
-fn is_param_name_suffix_of_fn_name(
-    param_name: &str,
-    callable: &Callable,
-    fn_name: Option<&str>,
-) -> bool {
-    match (callable.n_params(), fn_name) {
-        (1, Some(function)) => {
-            function == param_name
-                || function
-                    .len()
-                    .checked_sub(param_name.len())
-                    .and_then(|at| function.is_char_boundary(at).then(|| function.split_at(at)))
-                    .map_or(false, |(prefix, suffix)| {
-                        suffix.eq_ignore_ascii_case(param_name) && prefix.ends_with('_')
-                    })
-        }
-        _ => false,
-    }
-}
-
-fn is_enum_name_similar_to_param_name(
-    sema: &Semantics<RootDatabase>,
-    argument: &ast::Expr,
-    param_name: &str,
-) -> bool {
-    match sema.type_of_expr(argument).and_then(|t| t.original.as_adt()) {
-        Some(hir::Adt::Enum(e)) => {
-            to_lower_snake_case(&e.name(sema.db).to_smol_str()) == param_name
-        }
-        _ => false,
-    }
-}
-
-fn get_string_representation(expr: &ast::Expr) -> Option<String> {
-    match expr {
-        ast::Expr::MethodCallExpr(method_call_expr) => {
-            let name_ref = method_call_expr.name_ref()?;
-            match name_ref.text().as_str() {
-                "clone" | "as_ref" => method_call_expr.receiver().map(|rec| rec.to_string()),
-                name_ref => Some(name_ref.to_owned()),
-            }
-        }
-        ast::Expr::FieldExpr(field_expr) => Some(field_expr.name_ref()?.to_string()),
-        ast::Expr::PathExpr(path_expr) => Some(path_expr.path()?.segment()?.to_string()),
-        ast::Expr::PrefixExpr(prefix_expr) => get_string_representation(&prefix_expr.expr()?),
-        ast::Expr::RefExpr(ref_expr) => get_string_representation(&ref_expr.expr()?),
-        _ => None,
-    }
-}
-
-fn is_obvious_param(param_name: &str) -> bool {
-    // avoid displaying hints for common functions like map, filter, etc.
-    // or other obvious words used in std
-    let is_obvious_param_name =
-        matches!(param_name, "predicate" | "value" | "pat" | "rhs" | "other");
-    param_name.len() == 1 || is_obvious_param_name
-}
-
-fn get_callable(
-    sema: &Semantics<RootDatabase>,
-    expr: &ast::Expr,
-) -> Option<(hir::Callable, ast::ArgList)> {
-    match expr {
-        ast::Expr::CallExpr(expr) => {
-            let descended = sema.descend_node_into_attributes(expr.clone()).pop();
-            let expr = descended.as_ref().unwrap_or(expr);
-            sema.type_of_expr(&expr.expr()?)?.original.as_callable(sema.db).zip(expr.arg_list())
-        }
-        ast::Expr::MethodCallExpr(expr) => {
-            let descended = sema.descend_node_into_attributes(expr.clone()).pop();
-            let expr = descended.as_ref().unwrap_or(expr);
-            sema.resolve_method_call_as_callable(expr).zip(expr.arg_list())
-        }
-        _ => None,
-    }
+fn closure_has_block_body(closure: &ast::ClosureExpr) -> bool {
+    matches!(closure.body(), Some(ast::Expr::BlockExpr(_)))
 }
 
 #[cfg(test)]
 mod tests {
-    use expect_test::{expect, Expect};
+
+    use expect_test::Expect;
+    use hir::ClosureStyle;
+    use itertools::Itertools;
     use test_utils::extract_annotations;
 
-    use crate::{fixture, inlay_hints::InlayHintsConfig};
+    use crate::inlay_hints::{AdjustmentHints, AdjustmentHintsMode};
+    use crate::DiscriminantHints;
+    use crate::{fixture, inlay_hints::InlayHintsConfig, LifetimeElisionHints};
 
-    const TEST_CONFIG: InlayHintsConfig = InlayHintsConfig {
+    use super::{ClosureReturnTypeHints, GenericParameterHints, InlayFieldsToResolve};
+
+    pub(super) const DISABLED_CONFIG: InlayHintsConfig = InlayHintsConfig {
+        discriminant_hints: DiscriminantHints::Never,
+        render_colons: false,
+        type_hints: false,
+        parameter_hints: false,
+        generic_parameter_hints: GenericParameterHints {
+            type_hints: false,
+            lifetime_hints: false,
+            const_hints: false,
+        },
+        chaining_hints: false,
+        lifetime_elision_hints: LifetimeElisionHints::Never,
+        closure_return_type_hints: ClosureReturnTypeHints::Never,
+        closure_capture_hints: false,
+        adjustment_hints: AdjustmentHints::Never,
+        adjustment_hints_mode: AdjustmentHintsMode::Prefix,
+        adjustment_hints_hide_outside_unsafe: false,
+        binding_mode_hints: false,
+        hide_named_constructor_hints: false,
+        hide_closure_initialization_hints: false,
+        closure_style: ClosureStyle::ImplFn,
+        param_names_for_lifetime_elision_hints: false,
+        max_length: None,
+        closing_brace_hints_min_lines: None,
+        fields_to_resolve: InlayFieldsToResolve::empty(),
+        implicit_drop_hints: false,
+        range_exclusive_hints: false,
+    };
+    pub(super) const TEST_CONFIG: InlayHintsConfig = InlayHintsConfig {
         type_hints: true,
         parameter_hints: true,
         chaining_hints: true,
-        hide_named_constructor_hints: false,
-        max_length: None,
+        closure_return_type_hints: ClosureReturnTypeHints::WithBlock,
+        binding_mode_hints: true,
+        lifetime_elision_hints: LifetimeElisionHints::Always,
+        ..DISABLED_CONFIG
     };
 
     #[track_caller]
-    fn check(ra_fixture: &str) {
+    pub(super) fn check(ra_fixture: &str) {
         check_with_config(TEST_CONFIG, ra_fixture);
     }
 
     #[track_caller]
-    fn check_params(ra_fixture: &str) {
-        check_with_config(
-            InlayHintsConfig {
-                parameter_hints: true,
-                type_hints: false,
-                chaining_hints: false,
-                hide_named_constructor_hints: false,
-                max_length: None,
-            },
-            ra_fixture,
-        );
-    }
-
-    #[track_caller]
-    fn check_types(ra_fixture: &str) {
-        check_with_config(
-            InlayHintsConfig {
-                parameter_hints: false,
-                type_hints: true,
-                chaining_hints: false,
-                hide_named_constructor_hints: false,
-                max_length: None,
-            },
-            ra_fixture,
-        );
-    }
-
-    #[track_caller]
-    fn check_chains(ra_fixture: &str) {
-        check_with_config(
-            InlayHintsConfig {
-                parameter_hints: false,
-                type_hints: false,
-                chaining_hints: true,
-                hide_named_constructor_hints: false,
-                max_length: None,
-            },
-            ra_fixture,
-        );
-    }
-
-    #[track_caller]
-    fn check_with_config(config: InlayHintsConfig, ra_fixture: &str) {
+    pub(super) fn check_with_config(config: InlayHintsConfig, ra_fixture: &str) {
         let (analysis, file_id) = fixture::file(ra_fixture);
-        let expected = extract_annotations(&*analysis.file_text(file_id).unwrap());
-        let inlay_hints = analysis.inlay_hints(&config, file_id).unwrap();
-        let actual =
-            inlay_hints.into_iter().map(|it| (it.range, it.label.to_string())).collect::<Vec<_>>();
-        assert_eq!(expected, actual, "\nExpected:\n{:#?}\n\nActual:\n{:#?}", expected, actual);
+        let mut expected = extract_annotations(&analysis.file_text(file_id).unwrap());
+        let inlay_hints = analysis.inlay_hints(&config, file_id, None).unwrap();
+        let actual = inlay_hints
+            .into_iter()
+            // FIXME: We trim the start because some inlay produces leading whitespace which is not properly supported by our annotation extraction
+            .map(|it| (it.range, it.label.to_string().trim_start().to_owned()))
+            .sorted_by_key(|(range, _)| range.start())
+            .collect::<Vec<_>>();
+        expected.sort_by_key(|(range, _)| range.start());
+
+        assert_eq!(expected, actual, "\nExpected:\n{expected:#?}\n\nActual:\n{actual:#?}");
+    }
+
+    /// Computes inlay hints for the fixture, applies all the provided text edits and then runs
+    /// expect test.
+    #[track_caller]
+    pub(super) fn check_edit(config: InlayHintsConfig, ra_fixture: &str, expect: Expect) {
+        let (analysis, file_id) = fixture::file(ra_fixture);
+        let inlay_hints = analysis.inlay_hints(&config, file_id, None).unwrap();
+
+        let edits = inlay_hints
+            .into_iter()
+            .filter_map(|hint| hint.text_edit)
+            .reduce(|mut acc, next| {
+                acc.union(next).expect("merging text edits failed");
+                acc
+            })
+            .expect("no edit returned");
+
+        let mut actual = analysis.file_text(file_id).unwrap().to_string();
+        edits.apply(&mut actual);
+        expect.assert_eq(&actual);
     }
 
     #[track_caller]
-    fn check_expect(config: InlayHintsConfig, ra_fixture: &str, expect: Expect) {
+    pub(super) fn check_no_edit(config: InlayHintsConfig, ra_fixture: &str) {
         let (analysis, file_id) = fixture::file(ra_fixture);
-        let inlay_hints = analysis.inlay_hints(&config, file_id).unwrap();
-        expect.assert_debug_eq(&inlay_hints)
+        let inlay_hints = analysis.inlay_hints(&config, file_id, None).unwrap();
+
+        let edits: Vec<_> = inlay_hints.into_iter().filter_map(|hint| hint.text_edit).collect();
+
+        assert!(edits.is_empty(), "unexpected edits: {edits:?}");
     }
 
     #[test]
     fn hints_disabled() {
         check_with_config(
-            InlayHintsConfig {
-                type_hints: false,
-                parameter_hints: false,
-                chaining_hints: false,
-                hide_named_constructor_hints: false,
-                max_length: None,
-            },
+            InlayHintsConfig { render_colons: true, ..DISABLED_CONFIG },
             r#"
 fn foo(a: i32, b: i32) -> i32 { a + b }
 fn main() {
     let _x = foo(4, 4);
 }"#,
-        );
-    }
-
-    // Parameter hint tests
-
-    #[test]
-    fn param_hints_only() {
-        check_params(
-            r#"
-fn foo(a: i32, b: i32) -> i32 { a + b }
-fn main() {
-    let _x = foo(
-        4,
-      //^ a
-        4,
-      //^ b
-    );
-}"#,
-        );
-    }
-
-    #[test]
-    fn param_name_similar_to_fn_name_still_hints() {
-        check_params(
-            r#"
-fn max(x: i32, y: i32) -> i32 { x + y }
-fn main() {
-    let _x = max(
-        4,
-      //^ x
-        4,
-      //^ y
-    );
-}"#,
-        );
-    }
-
-    #[test]
-    fn param_name_similar_to_fn_name() {
-        check_params(
-            r#"
-fn param_with_underscore(with_underscore: i32) -> i32 { with_underscore }
-fn main() {
-    let _x = param_with_underscore(
-        4,
-    );
-}"#,
-        );
-        check_params(
-            r#"
-fn param_with_underscore(underscore: i32) -> i32 { underscore }
-fn main() {
-    let _x = param_with_underscore(
-        4,
-    );
-}"#,
-        );
-    }
-
-    #[test]
-    fn param_name_same_as_fn_name() {
-        check_params(
-            r#"
-fn foo(foo: i32) -> i32 { foo }
-fn main() {
-    let _x = foo(
-        4,
-    );
-}"#,
-        );
-    }
-
-    #[test]
-    fn never_hide_param_when_multiple_params() {
-        check_params(
-            r#"
-fn foo(foo: i32, bar: i32) -> i32 { bar + baz }
-fn main() {
-    let _x = foo(
-        4,
-      //^ foo
-        8,
-      //^ bar
-    );
-}"#,
-        );
-    }
-
-    #[test]
-    fn param_hints_look_through_as_ref_and_clone() {
-        check_params(
-            r#"
-fn foo(bar: i32, baz: f32) {}
-
-fn main() {
-    let bar = 3;
-    let baz = &"baz";
-    let fez = 1.0;
-    foo(bar.clone(), bar.clone());
-                   //^^^^^^^^^^^ baz
-    foo(bar.as_ref(), bar.as_ref());
-                    //^^^^^^^^^^^^ baz
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn self_param_hints() {
-        check_params(
-            r#"
-struct Foo;
-
-impl Foo {
-    fn foo(self: Self) {}
-    fn bar(self: &Self) {}
-}
-
-fn main() {
-    Foo::foo(Foo);
-           //^^^ self
-    Foo::bar(&Foo);
-           //^^^^ self
-}
-"#,
-        )
-    }
-
-    #[test]
-    fn param_name_hints_show_for_literals() {
-        check_params(
-            r#"pub fn test(a: i32, b: i32) -> [i32; 2] { [a, b] }
-fn main() {
-    test(
-        0xa_b,
-      //^^^^^ a
-        0xa_b,
-      //^^^^^ b
-    );
-}"#,
-        )
-    }
-
-    #[test]
-    fn function_call_parameter_hint() {
-        check_params(
-            r#"
-//- minicore: option
-struct FileId {}
-struct SmolStr {}
-
-struct TextRange {}
-struct SyntaxKind {}
-struct NavigationTarget {}
-
-struct Test {}
-
-impl Test {
-    fn method(&self, mut param: i32) -> i32 { param * 2 }
-
-    fn from_syntax(
-        file_id: FileId,
-        name: SmolStr,
-        focus_range: Option<TextRange>,
-        full_range: TextRange,
-        kind: SyntaxKind,
-        docs: Option<String>,
-    ) -> NavigationTarget {
-        NavigationTarget {}
-    }
-}
-
-fn test_func(mut foo: i32, bar: i32, msg: &str, _: i32, last: i32) -> i32 {
-    foo + bar
-}
-
-fn main() {
-    let not_literal = 1;
-    let _: i32 = test_func(1,    2,      "hello", 3,  not_literal);
-                         //^ foo ^ bar   ^^^^^^^ msg  ^^^^^^^^^^^ last
-    let t: Test = Test {};
-    t.method(123);
-           //^^^ param
-    Test::method(&t,      3456);
-               //^^ self  ^^^^ param
-    Test::from_syntax(
-        FileId {},
-      //^^^^^^^^^ file_id
-        "impl".into(),
-      //^^^^^^^^^^^^^ name
-        None,
-      //^^^^ focus_range
-        TextRange {},
-      //^^^^^^^^^^^^ full_range
-        SyntaxKind {},
-      //^^^^^^^^^^^^^ kind
-        None,
-      //^^^^ docs
-    );
-}"#,
-        );
-    }
-
-    #[test]
-    fn parameter_hint_heuristics() {
-        check_params(
-            r#"
-fn check(ra_fixture_thing: &str) {}
-
-fn map(f: i32) {}
-fn filter(predicate: i32) {}
-
-fn strip_suffix(suffix: &str) {}
-fn stripsuffix(suffix: &str) {}
-fn same(same: u32) {}
-fn same2(_same2: u32) {}
-
-fn enum_matches_param_name(completion_kind: CompletionKind) {}
-
-fn foo(param: u32) {}
-fn bar(param_eter: u32) {}
-
-enum CompletionKind {
-    Keyword,
-}
-
-fn non_ident_pat((a, b): (u32, u32)) {}
-
-fn main() {
-    const PARAM: u32 = 0;
-    foo(PARAM);
-    foo(!PARAM);
-     // ^^^^^^ param
-    check("");
-
-    map(0);
-    filter(0);
-
-    strip_suffix("");
-    stripsuffix("");
-              //^^ suffix
-    same(0);
-    same2(0);
-
-    enum_matches_param_name(CompletionKind::Keyword);
-
-    let param = 0;
-    foo(param);
-    let param_end = 0;
-    foo(param_end);
-    let start_param = 0;
-    foo(start_param);
-    let param2 = 0;
-    foo(param2);
-      //^^^^^^ param
-
-    let param_eter = 0;
-    bar(param_eter);
-    let param_eter_end = 0;
-    bar(param_eter_end);
-    let start_param_eter = 0;
-    bar(start_param_eter);
-    let param_eter2 = 0;
-    bar(param_eter2);
-      //^^^^^^^^^^^ param_eter
-
-    non_ident_pat((0, 0));
-}"#,
-        );
-    }
-
-    // Type-Hint tests
-
-    #[test]
-    fn type_hints_only() {
-        check_types(
-            r#"
-fn foo(a: i32, b: i32) -> i32 { a + b }
-fn main() {
-    let _x = foo(4, 4);
-      //^^ i32
-}"#,
-        );
-    }
-
-    #[test]
-    fn type_hints_bindings_after_at() {
-        check_types(
-            r#"
-//- minicore: option
-fn main() {
-    let ref foo @ bar @ ref mut baz = 0;
-          //^^^ &i32
-                //^^^ i32
-                              //^^^ &mut i32
-    let [x @ ..] = [0];
-       //^ [i32; 1]
-    if let x @ Some(_) = Some(0) {}
-         //^ Option<i32>
-    let foo @ (bar, baz) = (3, 3);
-      //^^^ (i32, i32)
-             //^^^ i32
-                  //^^^ i32
-}"#,
-        );
-    }
-
-    #[test]
-    fn default_generic_types_should_not_be_displayed() {
-        check(
-            r#"
-struct Test<K, T = u8> { k: K, t: T }
-
-fn main() {
-    let zz = Test { t: 23u8, k: 33 };
-      //^^ Test<i32>
-    let zz_ref = &zz;
-      //^^^^^^ &Test<i32>
-    let test = || zz;
-      //^^^^ || -> Test<i32>
-}"#,
-        );
-    }
-
-    #[test]
-    fn shorten_iterators_in_associated_params() {
-        check_types(
-            r#"
-//- minicore: iterators
-use core::iter;
-
-pub struct SomeIter<T> {}
-
-impl<T> SomeIter<T> {
-    pub fn new() -> Self { SomeIter {} }
-    pub fn push(&mut self, t: T) {}
-}
-
-impl<T> Iterator for SomeIter<T> {
-    type Item = T;
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
-
-fn main() {
-    let mut some_iter = SomeIter::new();
-          //^^^^^^^^^ SomeIter<Take<Repeat<i32>>>
-      some_iter.push(iter::repeat(2).take(2));
-    let iter_of_iters = some_iter.take(2);
-      //^^^^^^^^^^^^^ impl Iterator<Item = impl Iterator<Item = i32>>
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn infer_call_method_return_associated_types_with_generic() {
-        check_types(
-            r#"
-            pub trait Default {
-                fn default() -> Self;
-            }
-            pub trait Foo {
-                type Bar: Default;
-            }
-
-            pub fn quux<T: Foo>() -> T::Bar {
-                let y = Default::default();
-                  //^ <T as Foo>::Bar
-
-                y
-            }
-            "#,
-        );
-    }
-
-    #[test]
-    fn fn_hints() {
-        check_types(
-            r#"
-//- minicore: fn, sized
-fn foo() -> impl Fn() { loop {} }
-fn foo1() -> impl Fn(f64) { loop {} }
-fn foo2() -> impl Fn(f64, f64) { loop {} }
-fn foo3() -> impl Fn(f64, f64) -> u32 { loop {} }
-fn foo4() -> &'static dyn Fn(f64, f64) -> u32 { loop {} }
-fn foo5() -> &'static dyn Fn(&'static dyn Fn(f64, f64) -> u32, f64) -> u32 { loop {} }
-fn foo6() -> impl Fn(f64, f64) -> u32 + Sized { loop {} }
-fn foo7() -> *const (impl Fn(f64, f64) -> u32 + Sized) { loop {} }
-
-fn main() {
-    let foo = foo();
-     // ^^^ impl Fn()
-    let foo = foo1();
-     // ^^^ impl Fn(f64)
-    let foo = foo2();
-     // ^^^ impl Fn(f64, f64)
-    let foo = foo3();
-     // ^^^ impl Fn(f64, f64) -> u32
-    let foo = foo4();
-     // ^^^ &dyn Fn(f64, f64) -> u32
-    let foo = foo5();
-     // ^^^ &dyn Fn(&dyn Fn(f64, f64) -> u32, f64) -> u32
-    let foo = foo6();
-     // ^^^ impl Fn(f64, f64) -> u32
-    let foo = foo7();
-     // ^^^ *const impl Fn(f64, f64) -> u32
-}
-"#,
-        )
-    }
-
-    #[test]
-    fn fn_hints_ptr_rpit_fn_parentheses() {
-        check_types(
-            r#"
-//- minicore: fn, sized
-trait Trait {}
-
-fn foo1() -> *const impl Fn() { loop {} }
-fn foo2() -> *const (impl Fn() + Sized) { loop {} }
-fn foo3() -> *const (impl Fn() + ?Sized) { loop {} }
-fn foo4() -> *const (impl Sized + Fn()) { loop {} }
-fn foo5() -> *const (impl ?Sized + Fn()) { loop {} }
-fn foo6() -> *const (impl Fn() + Trait) { loop {} }
-fn foo7() -> *const (impl Fn() + Sized + Trait) { loop {} }
-fn foo8() -> *const (impl Fn() + ?Sized + Trait) { loop {} }
-fn foo9() -> *const (impl Fn() -> u8 + ?Sized) { loop {} }
-fn foo10() -> *const (impl Fn() + Sized + ?Sized) { loop {} }
-
-fn main() {
-    let foo = foo1();
-    //  ^^^ *const impl Fn()
-    let foo = foo2();
-    //  ^^^ *const impl Fn()
-    let foo = foo3();
-    //  ^^^ *const (impl Fn() + ?Sized)
-    let foo = foo4();
-    //  ^^^ *const impl Fn()
-    let foo = foo5();
-    //  ^^^ *const (impl Fn() + ?Sized)
-    let foo = foo6();
-    //  ^^^ *const (impl Fn() + Trait)
-    let foo = foo7();
-    //  ^^^ *const (impl Fn() + Trait)
-    let foo = foo8();
-    //  ^^^ *const (impl Fn() + Trait + ?Sized)
-    let foo = foo9();
-    //  ^^^ *const (impl Fn() -> u8 + ?Sized)
-    let foo = foo10();
-    //  ^^^ *const impl Fn()
-}
-"#,
-        )
-    }
-
-    #[test]
-    fn unit_structs_have_no_type_hints() {
-        check_types(
-            r#"
-//- minicore: result
-struct SyntheticSyntax;
-
-fn main() {
-    match Ok(()) {
-        Ok(_) => (),
-        Err(SyntheticSyntax) => (),
-    }
-}"#,
-        );
-    }
-
-    #[test]
-    fn let_statement() {
-        check_types(
-            r#"
-#[derive(PartialEq)]
-enum Option<T> { None, Some(T) }
-
-#[derive(PartialEq)]
-struct Test { a: Option<u32>, b: u8 }
-
-fn main() {
-    struct InnerStruct {}
-
-    let test = 54;
-      //^^^^ i32
-    let test: i32 = 33;
-    let mut test = 33;
-          //^^^^ i32
-    let _ = 22;
-    let test = "test";
-      //^^^^ &str
-    let test = InnerStruct {};
-      //^^^^ InnerStruct
-
-    let test = unresolved();
-
-    let test = (42, 'a');
-      //^^^^ (i32, char)
-    let (a,    (b,     (c,)) = (2, (3, (9.2,));
-       //^ i32  ^ i32   ^ f64
-    let &x = &92;
-       //^ i32
-}"#,
-        );
-    }
-
-    #[test]
-    fn if_expr() {
-        check_types(
-            r#"
-//- minicore: option
-struct Test { a: Option<u32>, b: u8 }
-
-fn main() {
-    let test = Some(Test { a: Some(3), b: 1 });
-      //^^^^ Option<Test>
-    if let None = &test {};
-    if let test = &test {};
-         //^^^^ &Option<Test>
-    if let Some(test) = &test {};
-              //^^^^ &Test
-    if let Some(Test { a,             b }) = &test {};
-                     //^ &Option<u32> ^ &u8
-    if let Some(Test { a: x,             b: y }) = &test {};
-                        //^ &Option<u32>    ^ &u8
-    if let Some(Test { a: Some(x),  b: y }) = &test {};
-                             //^ &u32  ^ &u8
-    if let Some(Test { a: None,  b: y }) = &test {};
-                                  //^ &u8
-    if let Some(Test { b: y, .. }) = &test {};
-                        //^ &u8
-    if test == None {}
-}"#,
-        );
-    }
-
-    #[test]
-    fn while_expr() {
-        check_types(
-            r#"
-//- minicore: option
-struct Test { a: Option<u32>, b: u8 }
-
-fn main() {
-    let test = Some(Test { a: Some(3), b: 1 });
-      //^^^^ Option<Test>
-    while let Some(Test { a: Some(x),  b: y }) = &test {};
-                                //^ &u32  ^ &u8
-}"#,
-        );
-    }
-
-    #[test]
-    fn match_arm_list() {
-        check_types(
-            r#"
-//- minicore: option
-struct Test { a: Option<u32>, b: u8 }
-
-fn main() {
-    match Some(Test { a: Some(3), b: 1 }) {
-        None => (),
-        test => (),
-      //^^^^ Option<Test>
-        Some(Test { a: Some(x), b: y }) => (),
-                          //^ u32  ^ u8
-        _ => {}
-    }
-}"#,
-        );
-    }
-
-    #[test]
-    fn incomplete_for_no_hint() {
-        check_types(
-            r#"
-fn main() {
-    let data = &[1i32, 2, 3];
-      //^^^^ &[i32; 3]
-    for i
-}"#,
-        );
-        check(
-            r#"
-pub struct Vec<T> {}
-
-impl<T> Vec<T> {
-    pub fn new() -> Self { Vec {} }
-    pub fn push(&mut self, t: T) {}
-}
-
-impl<T> IntoIterator for Vec<T> {
-    type Item=T;
-}
-
-fn main() {
-    let mut data = Vec::new();
-          //^^^^ Vec<&str>
-    data.push("foo");
-    for i in
-
-    println!("Unit expr");
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn complete_for_hint() {
-        check_types(
-            r#"
-//- minicore: iterator
-pub struct Vec<T> {}
-
-impl<T> Vec<T> {
-    pub fn new() -> Self { Vec {} }
-    pub fn push(&mut self, t: T) {}
-}
-
-impl<T> IntoIterator for Vec<T> {
-    type Item=T;
-}
-
-fn main() {
-    let mut data = Vec::new();
-          //^^^^ Vec<&str>
-    data.push("foo");
-    for i in data {
-      //^ &str
-      let z = i;
-        //^ &str
-    }
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn multi_dyn_trait_bounds() {
-        check_types(
-            r#"
-pub struct Vec<T> {}
-
-impl<T> Vec<T> {
-    pub fn new() -> Self { Vec {} }
-}
-
-pub struct Box<T> {}
-
-trait Display {}
-trait Sync {}
-
-fn main() {
-    // The block expression wrapping disables the constructor hint hiding logic
-    let _v = { Vec::<Box<&(dyn Display + Sync)>>::new() };
-      //^^ Vec<Box<&(dyn Display + Sync)>>
-    let _v = { Vec::<Box<*const (dyn Display + Sync)>>::new() };
-      //^^ Vec<Box<*const (dyn Display + Sync)>>
-    let _v = { Vec::<Box<dyn Display + Sync>>::new() };
-      //^^ Vec<Box<dyn Display + Sync>>
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn shorten_iterator_hints() {
-        check_types(
-            r#"
-//- minicore: iterators
-use core::iter;
-
-struct MyIter;
-
-impl Iterator for MyIter {
-    type Item = ();
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
-
-fn main() {
-    let _x = MyIter;
-      //^^ MyIter
-    let _x = iter::repeat(0);
-      //^^ impl Iterator<Item = i32>
-    fn generic<T: Clone>(t: T) {
-        let _x = iter::repeat(t);
-          //^^ impl Iterator<Item = T>
-        let _chained = iter::repeat(t).take(10);
-          //^^^^^^^^ impl Iterator<Item = T>
-    }
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn skip_constructor_and_enum_type_hints() {
-        check_with_config(
-            InlayHintsConfig {
-                type_hints: true,
-                parameter_hints: true,
-                chaining_hints: true,
-                hide_named_constructor_hints: true,
-                max_length: None,
-            },
-            r#"
-//- minicore: try, option
-use core::ops::ControlFlow;
-
-mod x {
-    pub mod y { pub struct Foo; }
-    pub struct Foo;
-    pub enum AnotherEnum {
-        Variant()
-    };
-}
-struct Struct;
-struct TupleStruct();
-
-impl Struct {
-    fn new() -> Self {
-        Struct
-    }
-    fn try_new() -> ControlFlow<(), Self> {
-        ControlFlow::Continue(Struct)
-    }
-}
-
-struct Generic<T>(T);
-impl Generic<i32> {
-    fn new() -> Self {
-        Generic(0)
-    }
-}
-
-enum Enum {
-    Variant(u32)
-}
-
-fn times2(value: i32) -> i32 {
-    2 * value
-}
-
-fn main() {
-    let enumb = Enum::Variant(0);
-
-    let strukt = x::Foo;
-    let strukt = x::y::Foo;
-    let strukt = Struct;
-    let strukt = Struct::new();
-
-    let tuple_struct = TupleStruct();
-
-    let generic0 = Generic::new();
-    //  ^^^^^^^^ Generic<i32>
-    let generic1 = Generic(0);
-    //  ^^^^^^^^ Generic<i32>
-    let generic2 = Generic::<i32>::new();
-    let generic3 = <Generic<i32>>::new();
-    let generic4 = Generic::<i32>(0);
-
-
-    let option = Some(0);
-    //  ^^^^^^ Option<i32>
-    let func = times2;
-    //  ^^^^ fn times2(i32) -> i32
-    let closure = |x: i32| x * 2;
-    //  ^^^^^^^ |i32| -> i32
-}
-
-fn fallible() -> ControlFlow<()> {
-    let strukt = Struct::try_new()?;
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn shows_constructor_type_hints_when_enabled() {
-        check_types(
-            r#"
-//- minicore: try
-use core::ops::ControlFlow;
-
-struct Struct;
-struct TupleStruct();
-
-impl Struct {
-    fn new() -> Self {
-        Struct
-    }
-    fn try_new() -> ControlFlow<(), Self> {
-        ControlFlow::Continue(Struct)
-    }
-}
-
-struct Generic<T>(T);
-impl Generic<i32> {
-    fn new() -> Self {
-        Generic(0)
-    }
-}
-
-fn main() {
-    let strukt = Struct::new();
-     // ^^^^^^ Struct
-    let tuple_struct = TupleStruct();
-     // ^^^^^^^^^^^^ TupleStruct
-    let generic0 = Generic::new();
-     // ^^^^^^^^ Generic<i32>
-    let generic1 = Generic::<i32>::new();
-     // ^^^^^^^^ Generic<i32>
-    let generic2 = <Generic<i32>>::new();
-     // ^^^^^^^^ Generic<i32>
-}
-
-fn fallible() -> ControlFlow<()> {
-    let strukt = Struct::try_new()?;
-     // ^^^^^^ Struct
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn closures() {
-        check(
-            r#"
-fn main() {
-    let mut start = 0;
-          //^^^^^ i32
-    (0..2).for_each(|increment| { start += increment; });
-                   //^^^^^^^^^ i32
-
-    let multiply =
-      //^^^^^^^^ |i32, i32| -> i32
-      | a,     b| a * b
-      //^ i32  ^ i32
-    ;
-
-    let _: i32 = multiply(1, 2);
-    let multiply_ref = &multiply;
-      //^^^^^^^^^^^^ &|i32, i32| -> i32
-
-    let return_42 = || 42;
-      //^^^^^^^^^ || -> i32
-}"#,
-        );
-    }
-
-    #[test]
-    fn hint_truncation() {
-        check_with_config(
-            InlayHintsConfig { max_length: Some(8), ..TEST_CONFIG },
-            r#"
-struct Smol<T>(T);
-
-struct VeryLongOuterName<T>(T);
-
-fn main() {
-    let a = Smol(0u32);
-      //^ Smol<u32>
-    let b = VeryLongOuterName(0usize);
-      //^ VeryLongOuterName<…>
-    let c = Smol(Smol(0u32))
-      //^ Smol<Smol<…>>
-}"#,
-        );
-    }
-
-    // Chaining hint tests
-
-    #[test]
-    fn chaining_hints_ignore_comments() {
-        check_expect(
-            InlayHintsConfig {
-                parameter_hints: false,
-                type_hints: false,
-                chaining_hints: true,
-                hide_named_constructor_hints: false,
-                max_length: None,
-            },
-            r#"
-struct A(B);
-impl A { fn into_b(self) -> B { self.0 } }
-struct B(C);
-impl B { fn into_c(self) -> C { self.0 } }
-struct C;
-
-fn main() {
-    let c = A(B(C))
-        .into_b() // This is a comment
-        // This is another comment
-        .into_c();
-}
-"#,
-            expect![[r#"
-                [
-                    InlayHint {
-                        range: 147..172,
-                        kind: ChainingHint,
-                        label: "B",
-                    },
-                    InlayHint {
-                        range: 147..154,
-                        kind: ChainingHint,
-                        label: "A",
-                    },
-                ]
-            "#]],
-        );
-    }
-
-    #[test]
-    fn chaining_hints_without_newlines() {
-        check_chains(
-            r#"
-struct A(B);
-impl A { fn into_b(self) -> B { self.0 } }
-struct B(C);
-impl B { fn into_c(self) -> C { self.0 } }
-struct C;
-
-fn main() {
-    let c = A(B(C)).into_b().into_c();
-}"#,
-        );
-    }
-
-    #[test]
-    fn struct_access_chaining_hints() {
-        check_expect(
-            InlayHintsConfig {
-                parameter_hints: false,
-                type_hints: false,
-                chaining_hints: true,
-                hide_named_constructor_hints: false,
-                max_length: None,
-            },
-            r#"
-struct A { pub b: B }
-struct B { pub c: C }
-struct C(pub bool);
-struct D;
-
-impl D {
-    fn foo(&self) -> i32 { 42 }
-}
-
-fn main() {
-    let x = A { b: B { c: C(true) } }
-        .b
-        .c
-        .0;
-    let x = D
-        .foo();
-}"#,
-            expect![[r#"
-                [
-                    InlayHint {
-                        range: 143..190,
-                        kind: ChainingHint,
-                        label: "C",
-                    },
-                    InlayHint {
-                        range: 143..179,
-                        kind: ChainingHint,
-                        label: "B",
-                    },
-                ]
-            "#]],
-        );
-    }
-
-    #[test]
-    fn generic_chaining_hints() {
-        check_expect(
-            InlayHintsConfig {
-                parameter_hints: false,
-                type_hints: false,
-                chaining_hints: true,
-                hide_named_constructor_hints: false,
-                max_length: None,
-            },
-            r#"
-struct A<T>(T);
-struct B<T>(T);
-struct C<T>(T);
-struct X<T,R>(T, R);
-
-impl<T> A<T> {
-    fn new(t: T) -> Self { A(t) }
-    fn into_b(self) -> B<T> { B(self.0) }
-}
-impl<T> B<T> {
-    fn into_c(self) -> C<T> { C(self.0) }
-}
-fn main() {
-    let c = A::new(X(42, true))
-        .into_b()
-        .into_c();
-}
-"#,
-            expect![[r#"
-                [
-                    InlayHint {
-                        range: 246..283,
-                        kind: ChainingHint,
-                        label: "B<X<i32, bool>>",
-                    },
-                    InlayHint {
-                        range: 246..265,
-                        kind: ChainingHint,
-                        label: "A<X<i32, bool>>",
-                    },
-                ]
-            "#]],
-        );
-    }
-
-    #[test]
-    fn shorten_iterator_chaining_hints() {
-        check_expect(
-            InlayHintsConfig {
-                parameter_hints: false,
-                type_hints: false,
-                chaining_hints: true,
-                hide_named_constructor_hints: false,
-                max_length: None,
-            },
-            r#"
-//- minicore: iterators
-use core::iter;
-
-struct MyIter;
-
-impl Iterator for MyIter {
-    type Item = ();
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
-
-fn main() {
-    let _x = MyIter.by_ref()
-        .take(5)
-        .by_ref()
-        .take(5)
-        .by_ref();
-}
-"#,
-            expect![[r#"
-                [
-                    InlayHint {
-                        range: 174..241,
-                        kind: ChainingHint,
-                        label: "impl Iterator<Item = ()>",
-                    },
-                    InlayHint {
-                        range: 174..224,
-                        kind: ChainingHint,
-                        label: "impl Iterator<Item = ()>",
-                    },
-                    InlayHint {
-                        range: 174..206,
-                        kind: ChainingHint,
-                        label: "impl Iterator<Item = ()>",
-                    },
-                    InlayHint {
-                        range: 174..189,
-                        kind: ChainingHint,
-                        label: "&mut MyIter",
-                    },
-                ]
-            "#]],
-        );
-    }
-
-    #[test]
-    fn hints_in_attr_call() {
-        check_expect(
-            TEST_CONFIG,
-            r#"
-//- proc_macros: identity, input_replace
-struct Struct;
-impl Struct {
-    fn chain(self) -> Self {
-        self
-    }
-}
-#[proc_macros::identity]
-fn main() {
-    let strukt = Struct;
-    strukt
-        .chain()
-        .chain()
-        .chain();
-    Struct::chain(strukt);
-}
-"#,
-            expect![[r#"
-                [
-                    InlayHint {
-                        range: 124..130,
-                        kind: TypeHint,
-                        label: "Struct",
-                    },
-                    InlayHint {
-                        range: 145..185,
-                        kind: ChainingHint,
-                        label: "Struct",
-                    },
-                    InlayHint {
-                        range: 145..168,
-                        kind: ChainingHint,
-                        label: "Struct",
-                    },
-                    InlayHint {
-                        range: 222..228,
-                        kind: ParameterHint,
-                        label: "self",
-                    },
-                ]
-            "#]],
         );
     }
 }

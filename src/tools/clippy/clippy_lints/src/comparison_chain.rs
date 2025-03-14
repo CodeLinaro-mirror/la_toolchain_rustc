@@ -1,9 +1,10 @@
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::ty::implements_trait;
-use clippy_utils::{get_trait_def_id, if_sequence, in_constant, is_else_clause, paths, SpanlessEq};
+use clippy_utils::{SpanlessEq, if_sequence, is_else_clause, is_in_const_context};
 use rustc_hir::{BinOpKind, Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
+use rustc_span::sym;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -34,8 +35,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     ///
-    /// Could be written:
-    ///
+    /// Use instead:
     /// ```rust,ignore
     /// use std::cmp::Ordering;
     /// # fn a() {}
@@ -68,7 +68,7 @@ impl<'tcx> LateLintPass<'tcx> for ComparisonChain {
             return;
         }
 
-        if in_constant(cx, expr.hir_id) {
+        if is_in_const_context(cx) {
             return;
         }
 
@@ -107,7 +107,10 @@ impl<'tcx> LateLintPass<'tcx> for ComparisonChain {
 
                 // Check that the type being compared implements `core::cmp::Ord`
                 let ty = cx.typeck_results().expr_ty(lhs1);
-                let is_ord = get_trait_def_id(cx, &paths::ORD).map_or(false, |id| implements_trait(cx, ty, id, &[]));
+                let is_ord = cx
+                    .tcx
+                    .get_diagnostic_item(sym::Ord)
+                    .map_or(false, |id| implements_trait(cx, ty, id, &[]));
 
                 if !is_ord {
                     return;

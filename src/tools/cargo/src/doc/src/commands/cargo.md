@@ -2,7 +2,7 @@
 
 ## NAME
 
-cargo - The Rust package manager
+cargo --- The Rust package manager
 
 ## SYNOPSIS
 
@@ -56,8 +56,14 @@ available at <https://rust-lang.org>.
 
 ### Manifest Commands
 
+[cargo-add(1)](cargo-add.html)\
+&nbsp;&nbsp;&nbsp;&nbsp;Add dependencies to a `Cargo.toml` manifest file.
+
 [cargo-generate-lockfile(1)](cargo-generate-lockfile.html)\
 &nbsp;&nbsp;&nbsp;&nbsp;Generate `Cargo.lock` for a project.
+
+[cargo-info(1)](cargo-info.html)\
+&nbsp;&nbsp;&nbsp;&nbsp;Display information about a package in the registry. Default registry is crates.io.
 
 [cargo-locate-project(1)](cargo-locate-project.html)\
 &nbsp;&nbsp;&nbsp;&nbsp;Print a JSON representation of a `Cargo.toml` file's location.
@@ -67,6 +73,9 @@ available at <https://rust-lang.org>.
 
 [cargo-pkgid(1)](cargo-pkgid.html)\
 &nbsp;&nbsp;&nbsp;&nbsp;Print a fully qualified package specification.
+
+[cargo-remove(1)](cargo-remove.html)\
+&nbsp;&nbsp;&nbsp;&nbsp;Remove dependencies from a `Cargo.toml` manifest file.
 
 [cargo-tree(1)](cargo-tree.html)\
 &nbsp;&nbsp;&nbsp;&nbsp;Display a tree visualization of a dependency graph.
@@ -101,6 +110,9 @@ available at <https://rust-lang.org>.
 
 [cargo-login(1)](cargo-login.html)\
 &nbsp;&nbsp;&nbsp;&nbsp;Save an API token from the registry locally.
+
+[cargo-logout(1)](cargo-logout.html)\
+&nbsp;&nbsp;&nbsp;&nbsp;Remove an API token from the registry locally.
 
 [cargo-owner(1)](cargo-owner.html)\
 &nbsp;&nbsp;&nbsp;&nbsp;Manage the owners of a crate on the registry.
@@ -152,7 +164,7 @@ error message (for example, <code>E0004</code>).</dd>
 
 <dt class="option-term" id="option-cargo--v"><a class="option-anchor" href="#option-cargo--v"></a><code>-v</code></dt>
 <dt class="option-term" id="option-cargo---verbose"><a class="option-anchor" href="#option-cargo---verbose"></a><code>--verbose</code></dt>
-<dd class="option-desc">Use verbose output. May be specified twice for &quot;very verbose&quot; output which
+<dd class="option-desc">Use verbose output. May be specified twice for “very verbose” output which
 includes extra output such as dependency warnings and build script output.
 May also be specified with the <code>term.verbose</code>
 <a href="../reference/config.html">config value</a>.</dd>
@@ -177,21 +189,21 @@ terminal.</li>
 <a href="../reference/config.html">config value</a>.</dd>
 
 
-
 </dl>
 
 ### Manifest Options
 
 <dl>
-<dt class="option-term" id="option-cargo---frozen"><a class="option-anchor" href="#option-cargo---frozen"></a><code>--frozen</code></dt>
 <dt class="option-term" id="option-cargo---locked"><a class="option-anchor" href="#option-cargo---locked"></a><code>--locked</code></dt>
-<dd class="option-desc">Either of these flags requires that the <code>Cargo.lock</code> file is
-up-to-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The <code>--frozen</code> flag also prevents Cargo from
-attempting to access the network to determine if it is out-of-date.</p>
-<p>These may be used in environments where you want to assert that the
-<code>Cargo.lock</code> file is up-to-date (such as a CI build) or want to avoid network
-access.</dd>
+<dd class="option-desc">Asserts that the exact same dependencies and versions are used as when the
+existing <code>Cargo.lock</code> file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:</p>
+<ul>
+<li>The lock file is missing.</li>
+<li>Cargo attempted to change the lock file due to a different dependency resolution.</li>
+</ul>
+<p>It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.</dd>
 
 
 <dt class="option-term" id="option-cargo---offline"><a class="option-anchor" href="#option-cargo---offline"></a><code>--offline</code></dt>
@@ -207,6 +219,9 @@ offline.</p>
 <p>May also be specified with the <code>net.offline</code> <a href="../reference/config.html">config value</a>.</dd>
 
 
+<dt class="option-term" id="option-cargo---frozen"><a class="option-anchor" href="#option-cargo---frozen"></a><code>--frozen</code></dt>
+<dd class="option-desc">Equivalent to specifying both <code>--locked</code> and <code>--offline</code>.</dd>
+
 </dl>
 
 ### Common Options
@@ -221,6 +236,23 @@ See the <a href="https://rust-lang.github.io/rustup/overrides.html">rustup docum
 for more information about how toolchain overrides work.</dd>
 
 
+<dt class="option-term" id="option-cargo---config"><a class="option-anchor" href="#option-cargo---config"></a><code>--config</code> <em>KEY=VALUE</em> or <em>PATH</em></dt>
+<dd class="option-desc">Overrides a Cargo configuration value. The argument should be in TOML syntax of <code>KEY=VALUE</code>,
+or provided as a path to an extra configuration file. This flag may be specified multiple times.
+See the <a href="../reference/config.html#command-line-overrides">command-line overrides section</a> for more information.</dd>
+
+
+<dt class="option-term" id="option-cargo--C"><a class="option-anchor" href="#option-cargo--C"></a><code>-C</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the current working directory before executing any specified operations. This affects
+things like where cargo looks by default for the project manifest (<code>Cargo.toml</code>), as well as
+the directories searched for discovering <code>.cargo/config.toml</code>, for example. This option must
+appear before the command name, for example <code>cargo -C path/to/my-project build</code>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/10098">#10098</a>).</dd>
+
+
 <dt class="option-term" id="option-cargo--h"><a class="option-anchor" href="#option-cargo--h"></a><code>-h</code></dt>
 <dt class="option-term" id="option-cargo---help"><a class="option-anchor" href="#option-cargo---help"></a><code>--help</code></dt>
 <dd class="option-desc">Prints help information.</dd>
@@ -232,18 +264,15 @@ for more information about how toolchain overrides work.</dd>
 
 </dl>
 
-
 ## ENVIRONMENT
 
 See [the reference](../reference/environment-variables.html) for
 details on environment variables that Cargo reads.
 
-
 ## EXIT STATUS
 
 * `0`: Cargo succeeded.
 * `101`: Cargo failed to complete.
-
 
 ## FILES
 
@@ -312,4 +341,5 @@ stable yet and may be subject to change.
 See <https://github.com/rust-lang/cargo/issues> for issues.
 
 ## SEE ALSO
+
 [rustc(1)](https://doc.rust-lang.org/rustc/index.html), [rustdoc(1)](https://doc.rust-lang.org/rustdoc/index.html)

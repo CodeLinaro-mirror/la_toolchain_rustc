@@ -18,7 +18,7 @@ The goals of this book are:
   How to best use Rust language features to write more correct embedded
   software.
 
-* Serve as a cookbook in some cases. e.g. How do I do mix C and Rust in a single
+* Serve as a cookbook in some cases. e.g. How do I mix C and Rust in a single
   project?
 
 This book tries to be as general as possible but to make things easier for both
@@ -60,6 +60,7 @@ If you are unfamiliar with anything mentioned above or if you want more informat
 | Rust, Embedded | [Embedded Rust Bookshelf](https://docs.rust-embedded.org) | Here you can find several other resources provided by Rust's Embedded Working Group. |
 | Rust, Embedded | [Embedonomicon](https://docs.rust-embedded.org/embedonomicon/) | The nitty gritty details when doing embedded programming in Rust. |
 | Rust, Embedded | [embedded FAQ](https://docs.rust-embedded.org/faq.html) | Frequently asked questions about Rust in an embedded context. |
+| Rust, Embedded | [Comprehensive Rust 🦀: Bare Metal](https://google.github.io/comprehensive-rust/bare-metal.html) | Teaching material for a 1-day class on bare-metal Rust development |
 | Interrupts | [Interrupt](https://en.wikipedia.org/wiki/Interrupt) | - |
 | Memory-mapped IO/Peripherals | [Memory-mapped I/O](https://en.wikipedia.org/wiki/Memory-mapped_I/O) | - |
 | SPI, UART, RS232, USB, I2C, TTL | [Stack Exchange about SPI, UART, and other interfaces](https://electronics.stackexchange.com/questions/37814/usart-uart-rs232-usb-spi-i2c-ttl-etc-what-are-all-of-these-and-how-do-th) | - |
@@ -71,6 +72,9 @@ translation listed here, please open a PR to add it.
 
 * [Japanese](https://tomoyuki-nakabayashi.github.io/book/)
   ([repository](https://github.com/tomoyuki-nakabayashi/book))
+
+* [Chinese](https://xxchang.github.io/book/)
+  ([repository](https://github.com/XxChang/book))
 
 ## How to Use This Book
 

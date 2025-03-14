@@ -1,7 +1,68 @@
-use crate::compare::{assert_match_exact, find_json_mismatch};
-use crate::registry::{self, alt_api_path};
+//! Helpers for testing `cargo package` / `cargo publish`
+//!
+//! # Example
+//!
+//! ```no_run
+//! # use cargo_test_support::registry::RegistryBuilder;
+//! # use cargo_test_support::publish::validate_upload;
+//! # use cargo_test_support::project;
+//! // This replaces `registry::init()` and must be called before `Package::new().publish()`
+//! let registry = RegistryBuilder::new().http_api().http_index().build();
+//!
+//! let p = project()
+//!     .file(
+//!         "Cargo.toml",
+//!         r#"
+//!             [package]
+//!             name = "foo"
+//!             version = "0.0.1"
+//!             edition = "2015"
+//!             authors = []
+//!             license = "MIT"
+//!             description = "foo"
+//!         "#,
+//!     )
+//!     .file("src/main.rs", "fn main() {}")
+//!     .build();
+//!
+//! p.cargo("publish --no-verify")
+//!     .replace_crates_io(registry.index_url())
+//!     .run();
+//!
+//! validate_upload(
+//!     r#"
+//!     {
+//!       "authors": [],
+//!       "badges": {},
+//!       "categories": [],
+//!       "deps": [],
+//!       "description": "foo",
+//!       "documentation": null,
+//!       "features": {},
+//!       "homepage": null,
+//!       "keywords": [],
+//!       "license": "MIT",
+//!       "license_file": null,
+//!       "links": null,
+//!       "name": "foo",
+//!       "readme": null,
+//!       "readme_file": null,
+//!       "repository": null,
+//!       "rust_version": null,
+//!       "vers": "0.0.1"
+//!       }
+//!     "#,
+//!     "foo-0.0.1.crate",
+//!     &["Cargo.lock", "Cargo.toml", "Cargo.toml.orig", "src/main.rs"],
+//! );
+//! ```
+
+use crate::compare::assert_match_exact;
+use crate::registry::{self, alt_api_path, FeatureMap};
 use flate2::read::GzDecoder;
+use snapbox::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::fs::File;
 use std::io::{self, prelude::*, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -16,7 +77,7 @@ where
     Ok(u32::from_le_bytes(buf))
 }
 
-/// Checks the result of a crate publish.
+/// Check the `cargo publish` API call
 pub fn validate_upload(expected_json: &str, expected_crate_name: &str, expected_files: &[&str]) {
     let new_path = registry::api_path().join("api/v1/crates/new");
     _validate_upload(
@@ -28,7 +89,7 @@ pub fn validate_upload(expected_json: &str, expected_crate_name: &str, expected_
     );
 }
 
-/// Checks the result of a crate publish, along with the contents of the files.
+/// Check the `cargo publish` API call, with file contents
 pub fn validate_upload_with_contents(
     expected_json: &str,
     expected_crate_name: &str,
@@ -45,7 +106,7 @@ pub fn validate_upload_with_contents(
     );
 }
 
-/// Checks the result of a crate publish to an alternative registry.
+/// Check the `cargo publish` API call to the alternative test registry
 pub fn validate_alt_upload(
     expected_json: &str,
     expected_crate_name: &str,
@@ -73,12 +134,8 @@ fn _validate_upload(
     let json_sz = read_le_u32(&mut f).expect("read json length");
     let mut json_bytes = vec![0; json_sz as usize];
     f.read_exact(&mut json_bytes).expect("read JSON data");
-    let actual_json = serde_json::from_slice(&json_bytes).expect("uploaded JSON should be valid");
-    let expected_json = serde_json::from_str(expected_json).expect("expected JSON does not parse");
 
-    if let Err(e) = find_json_mismatch(&expected_json, &actual_json, None) {
-        panic!("{}", e);
-    }
+    snapbox::assert_data_eq!(json_bytes, expected_json.is_json());
 
     // 32-bit little-endian integer of length of crate file.
     let crate_sz = read_le_u32(&mut f).expect("read crate length");
@@ -130,8 +187,11 @@ pub fn validate_crate_contents(
             (name, contents)
         })
         .collect();
-    assert!(expected_crate_name.ends_with(".crate"));
-    let base_crate_name = Path::new(&expected_crate_name[..expected_crate_name.len() - 6]);
+    let base_crate_name = Path::new(
+        expected_crate_name
+            .strip_suffix(".crate")
+            .expect("must end with .crate"),
+    );
     let actual_files: HashSet<PathBuf> = files.keys().cloned().collect();
     let expected_files: HashSet<PathBuf> = expected_files
         .iter()
@@ -153,5 +213,96 @@ pub fn validate_crate_contents(
                 .unwrap_or_else(|| panic!("file `{}` missing in archive", e_file_name));
             assert_match_exact(e_file_contents, actual_contents);
         }
+    }
+}
+
+pub(crate) fn create_index_line(
+    name: serde_json::Value,
+    vers: &str,
+    deps: Vec<serde_json::Value>,
+    cksum: &str,
+    features: crate::registry::FeatureMap,
+    yanked: bool,
+    links: Option<String>,
+    rust_version: Option<&str>,
+    v: Option<u32>,
+) -> String {
+    // This emulates what crates.io does to retain backwards compatibility.
+    let (features, features2) = split_index_features(features.clone());
+    let mut json = serde_json::json!({
+        "name": name,
+        "vers": vers,
+        "deps": deps,
+        "cksum": cksum,
+        "features": features,
+        "yanked": yanked,
+        "links": links,
+    });
+    if let Some(f2) = &features2 {
+        json["features2"] = serde_json::json!(f2);
+        json["v"] = serde_json::json!(2);
+    }
+    if let Some(v) = v {
+        json["v"] = serde_json::json!(v);
+    }
+    if let Some(rust_version) = rust_version {
+        json["rust_version"] = serde_json::json!(rust_version);
+    }
+
+    json.to_string()
+}
+
+pub(crate) fn write_to_index(registry_path: &Path, name: &str, line: String, local: bool) {
+    let file = cargo_util::registry::make_dep_path(name, false);
+
+    // Write file/line in the index.
+    let dst = if local {
+        registry_path.join("index").join(&file)
+    } else {
+        registry_path.join(&file)
+    };
+    let prev = fs::read_to_string(&dst).unwrap_or_default();
+    t!(fs::create_dir_all(dst.parent().unwrap()));
+    t!(fs::write(&dst, prev + &line[..] + "\n"));
+
+    // Add the new file to the index.
+    if !local {
+        let repo = t!(git2::Repository::open(&registry_path));
+        let mut index = t!(repo.index());
+        t!(index.add_path(Path::new(&file)));
+        t!(index.write());
+        let id = t!(index.write_tree());
+
+        // Commit this change.
+        let tree = t!(repo.find_tree(id));
+        let sig = t!(repo.signature());
+        let parent = t!(repo.refname_to_id("refs/heads/master"));
+        let parent = t!(repo.find_commit(parent));
+        t!(repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "Another commit",
+            &tree,
+            &[&parent]
+        ));
+    }
+}
+
+fn split_index_features(mut features: FeatureMap) -> (FeatureMap, Option<FeatureMap>) {
+    let mut features2 = FeatureMap::new();
+    for (feat, values) in features.iter_mut() {
+        if values
+            .iter()
+            .any(|value| value.starts_with("dep:") || value.contains("?/"))
+        {
+            let new_values = values.drain(..).collect();
+            features2.insert(feat.clone(), new_values);
+        }
+    }
+    if features2.is_empty() {
+        (features, None)
+    } else {
+        (features, Some(features2))
     }
 }

@@ -1,93 +1,155 @@
 use std::{
     env,
     fs::File,
-    io,
+    io::{self, BufWriter},
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
 use flate2::{write::GzEncoder, Compression};
-use xshell::{cmd, cp, mkdir_p, pushd, pushenv, read_file, rm_rf, write_file};
+use time::OffsetDateTime;
+use xshell::{cmd, Shell};
+use zip::{write::FileOptions, DateTime, ZipWriter};
 
-use crate::{date_iso, flags, project_root};
+use crate::{
+    date_iso,
+    flags::{self, Malloc},
+    project_root,
+};
+
+const VERSION_STABLE: &str = "0.3";
+const VERSION_NIGHTLY: &str = "0.4";
+const VERSION_DEV: &str = "0.5"; // keep this one in sync with `package.json`
 
 impl flags::Dist {
-    pub(crate) fn run(self) -> Result<()> {
-        let stable =
-            std::env::var("GITHUB_REF").unwrap_or_default().as_str() == "refs/heads/release";
+    pub(crate) fn run(self, sh: &Shell) -> anyhow::Result<()> {
+        let stable = sh.var("GITHUB_REF").unwrap_or_default().as_str() == "refs/heads/release";
 
         let project_root = project_root();
         let target = Target::get(&project_root);
+        let allocator = self.allocator();
         let dist = project_root.join("dist");
-        rm_rf(&dist)?;
-        mkdir_p(&dist)?;
-
-        let release_channel = if stable { "stable" } else { "nightly" };
-        dist_server(release_channel, &target)?;
+        sh.remove_path(&dist)?;
+        sh.create_dir(&dist)?;
 
         if let Some(patch_version) = self.client_patch_version {
             let version = if stable {
-                format!("0.2.{}", patch_version)
+                format!("{VERSION_STABLE}.{patch_version}")
             } else {
                 // A hack to make VS Code prefer nightly over stable.
-                format!("0.3.{}", patch_version)
+                format!("{VERSION_NIGHTLY}.{patch_version}")
             };
-            let release_tag = if stable { date_iso()? } else { "nightly".to_string() };
-            dist_client(&version, &release_tag, &target)?;
+            dist_server(sh, &format!("{version}-standalone"), &target, allocator)?;
+            let release_tag = if stable { date_iso(sh)? } else { "nightly".to_owned() };
+            dist_client(sh, &version, &release_tag, &target)?;
+        } else {
+            dist_server(sh, "0.0.0-standalone", &target, allocator)?;
         }
         Ok(())
     }
 }
 
-fn dist_client(version: &str, release_tag: &str, target: &Target) -> Result<()> {
+fn dist_client(
+    sh: &Shell,
+    version: &str,
+    release_tag: &str,
+    target: &Target,
+) -> anyhow::Result<()> {
     let bundle_path = Path::new("editors").join("code").join("server");
-    mkdir_p(&bundle_path)?;
-    cp(&target.server_path, &bundle_path)?;
+    sh.create_dir(&bundle_path)?;
+    sh.copy_file(&target.server_path, &bundle_path)?;
     if let Some(symbols_path) = &target.symbols_path {
-        cp(symbols_path, &bundle_path)?;
+        sh.copy_file(symbols_path, &bundle_path)?;
     }
 
-    let _d = pushd("./editors/code")?;
+    let _d = sh.push_dir("./editors/code");
 
-    let mut patch = Patch::new("./package.json")?;
+    let mut patch = Patch::new(sh, "./package.json")?;
     patch
-        .replace(r#""version": "0.4.0-dev""#, &format!(r#""version": "{}""#, version))
-        .replace(r#""releaseTag": null"#, &format!(r#""releaseTag": "{}""#, release_tag))
-        .replace(r#""$generated-start": {},"#, "")
-        .replace(",\n                \"$generated-end\": {}", "")
-        .replace(r#""enableProposedApi": true,"#, r#""#);
-    patch.commit()?;
+        .replace(
+            &format!(r#""version": "{VERSION_DEV}.0-dev""#),
+            &format!(r#""version": "{version}""#),
+        )
+        .replace(r#""releaseTag": null"#, &format!(r#""releaseTag": "{release_tag}""#))
+        .replace(r#""title": "$generated-start""#, "")
+        .replace(r#""title": "$generated-end""#, "")
+        .replace(r#""enabledApiProposals": [],"#, r#""#);
+    patch.commit(sh)?;
 
     Ok(())
 }
 
-fn dist_server(release_channel: &str, target: &Target) -> Result<()> {
-    let _e = pushenv("RUST_ANALYZER_CHANNEL", release_channel);
-    let _e = pushenv("CARGO_PROFILE_RELEASE_LTO", "thin");
+fn dist_server(
+    sh: &Shell,
+    release: &str,
+    target: &Target,
+    allocator: Malloc,
+) -> anyhow::Result<()> {
+    let _e = sh.push_env("CFG_RELEASE", release);
+    let _e = sh.push_env("CARGO_PROFILE_RELEASE_LTO", "thin");
 
     // Uncomment to enable debug info for releases. Note that:
     //   * debug info is split on windows and macs, so it does nothing for those platforms,
     //   * on Linux, this blows up the binary size from 8MB to 43MB, which is unreasonable.
-    // let _e = pushenv("CARGO_PROFILE_RELEASE_DEBUG", "1");
+    // let _e = sh.push_env("CARGO_PROFILE_RELEASE_DEBUG", "1");
 
     if target.name.contains("-linux-") {
         env::set_var("CC", "clang");
     }
 
     let target_name = &target.name;
-    cmd!("cargo build --manifest-path ./crates/rust-analyzer/Cargo.toml --bin rust-analyzer --target {target_name} --release").run()?;
+    let features = allocator.to_features();
+    cmd!(sh, "cargo build --manifest-path ./crates/rust-analyzer/Cargo.toml --bin rust-analyzer --target {target_name} {features...} --release").run()?;
 
     let dst = Path::new("dist").join(&target.artifact_name);
     gzip(&target.server_path, &dst.with_extension("gz"))?;
+    if target_name.contains("-windows-") {
+        zip(&target.server_path, target.symbols_path.as_ref(), &dst.with_extension("zip"))?;
+    }
 
     Ok(())
 }
 
-fn gzip(src_path: &Path, dest_path: &Path) -> Result<()> {
+fn gzip(src_path: &Path, dest_path: &Path) -> anyhow::Result<()> {
     let mut encoder = GzEncoder::new(File::create(dest_path)?, Compression::best());
     let mut input = io::BufReader::new(File::open(src_path)?);
     io::copy(&mut input, &mut encoder)?;
     encoder.finish()?;
+    Ok(())
+}
+
+fn zip(src_path: &Path, symbols_path: Option<&PathBuf>, dest_path: &Path) -> anyhow::Result<()> {
+    let file = File::create(dest_path)?;
+    let mut writer = ZipWriter::new(BufWriter::new(file));
+    writer.start_file(
+        src_path.file_name().unwrap().to_str().unwrap(),
+        FileOptions::default()
+            .last_modified_time(
+                DateTime::try_from(OffsetDateTime::from(std::fs::metadata(src_path)?.modified()?))
+                    .unwrap(),
+            )
+            .unix_permissions(0o755)
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(9)),
+    )?;
+    let mut input = io::BufReader::new(File::open(src_path)?);
+    io::copy(&mut input, &mut writer)?;
+    if let Some(symbols_path) = symbols_path {
+        writer.start_file(
+            symbols_path.file_name().unwrap().to_str().unwrap(),
+            FileOptions::default()
+                .last_modified_time(
+                    DateTime::try_from(OffsetDateTime::from(
+                        std::fs::metadata(src_path)?.modified()?,
+                    ))
+                    .unwrap(),
+                )
+                .compression_method(zip::CompressionMethod::Deflated)
+                .compression_level(Some(9)),
+        )?;
+        let mut input = io::BufReader::new(File::open(symbols_path)?);
+        io::copy(&mut input, &mut writer)?;
+    }
+    writer.finish()?;
     Ok(())
 }
 
@@ -104,11 +166,11 @@ impl Target {
             Ok(target) => target,
             _ => {
                 if cfg!(target_os = "linux") {
-                    "x86_64-unknown-linux-gnu".to_string()
+                    "x86_64-unknown-linux-gnu".to_owned()
                 } else if cfg!(target_os = "windows") {
-                    "x86_64-pc-windows-msvc".to_string()
+                    "x86_64-pc-windows-msvc".to_owned()
                 } else if cfg!(target_os = "macos") {
-                    "x86_64-apple-darwin".to_string()
+                    "x86_64-apple-darwin".to_owned()
                 } else {
                     panic!("Unsupported OS, maybe try setting RA_TARGET")
                 }
@@ -120,8 +182,8 @@ impl Target {
         } else {
             (String::new(), None)
         };
-        let server_path = out_path.join(format!("rust-analyzer{}", exe_suffix));
-        let artifact_name = format!("rust-analyzer-{}{}", name, exe_suffix);
+        let server_path = out_path.join(format!("rust-analyzer{exe_suffix}"));
+        let artifact_name = format!("rust-analyzer-{name}{exe_suffix}");
         Self { name, server_path, symbols_path, artifact_name }
     }
 }
@@ -133,9 +195,9 @@ struct Patch {
 }
 
 impl Patch {
-    fn new(path: impl Into<PathBuf>) -> Result<Patch> {
+    fn new(sh: &Shell, path: impl Into<PathBuf>) -> anyhow::Result<Patch> {
         let path = path.into();
-        let contents = read_file(&path)?;
+        let contents = sh.read_file(&path)?;
         Ok(Patch { path, original_contents: contents.clone(), contents })
     }
 
@@ -145,8 +207,8 @@ impl Patch {
         self
     }
 
-    fn commit(&self) -> Result<()> {
-        write_file(&self.path, &self.contents)?;
+    fn commit(&self, sh: &Shell) -> anyhow::Result<()> {
+        sh.write_file(&self.path, &self.contents)?;
         Ok(())
     }
 }

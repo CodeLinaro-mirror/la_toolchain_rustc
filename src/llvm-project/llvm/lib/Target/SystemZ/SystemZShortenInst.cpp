@@ -13,7 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "SystemZTargetMachine.h"
-#include "llvm/CodeGen/LivePhysRegs.h"
+#include "llvm/CodeGen/LiveRegUnits.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
@@ -46,7 +46,7 @@ private:
 
   const SystemZInstrInfo *TII;
   const TargetRegisterInfo *TRI;
-  LivePhysRegs LiveRegs;
+  LiveRegUnits LiveRegs;
 };
 
 char SystemZShortenInst::ID = 0;
@@ -88,7 +88,7 @@ bool SystemZShortenInst::shortenIIF(MachineInstr &MI, unsigned LLIxL,
   unsigned GR64BitReg =
       TRI->getMatchingSuperReg(Reg, thisSubRegIdx, &SystemZ::GR64BitRegClass);
   Register OtherReg = TRI->getSubReg(GR64BitReg, otherSubRegIdx);
-  if (LiveRegs.contains(OtherReg))
+  if (!LiveRegs.available(OtherReg))
     return false;
 
   uint64_t Imm = MI.getOperand(1).getImm();
@@ -143,7 +143,7 @@ bool SystemZShortenInst::shortenOn001(MachineInstr &MI, unsigned Opcode) {
 // Calls shortenOn001 if CCLive is false. CC def operand is added in
 // case of success.
 bool SystemZShortenInst::shortenOn001AddCC(MachineInstr &MI, unsigned Opcode) {
-  if (!LiveRegs.contains(SystemZ::CC) && shortenOn001(MI, Opcode)) {
+  if (LiveRegs.available(SystemZ::CC) && shortenOn001(MI, Opcode)) {
     MachineInstrBuilder(*MI.getParent()->getParent(), &MI)
       .addReg(SystemZ::CC, RegState::ImplicitDefine | RegState::Dead);
     return true;
@@ -162,10 +162,10 @@ bool SystemZShortenInst::shortenFPConv(MachineInstr &MI, unsigned Opcode) {
     MachineOperand Src(MI.getOperand(1));
     MachineOperand Suppress(MI.getOperand(2));
     MachineOperand Mode(MI.getOperand(3));
-    MI.RemoveOperand(3);
-    MI.RemoveOperand(2);
-    MI.RemoveOperand(1);
-    MI.RemoveOperand(0);
+    MI.removeOperand(3);
+    MI.removeOperand(2);
+    MI.removeOperand(1);
+    MI.removeOperand(0);
     MI.setDesc(TII->get(Opcode));
     MachineInstrBuilder(*MI.getParent()->getParent(), &MI)
         .add(Dest)
@@ -190,9 +190,9 @@ bool SystemZShortenInst::shortenFusedFPOp(MachineInstr &MI, unsigned Opcode) {
     MachineOperand Lhs(LHSMO);
     MachineOperand Rhs(RHSMO);
     MachineOperand Src(AccMO);
-    MI.RemoveOperand(3);
-    MI.RemoveOperand(2);
-    MI.RemoveOperand(1);
+    MI.removeOperand(3);
+    MI.removeOperand(2);
+    MI.removeOperand(1);
     MI.setDesc(TII->get(Opcode));
     MachineInstrBuilder(*MI.getParent()->getParent(), &MI)
         .add(Src)

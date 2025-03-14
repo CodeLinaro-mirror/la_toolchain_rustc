@@ -1,5 +1,8 @@
 ## Procedural Macros
 
+r[macro.proc]
+
+r[macro.proc.intro]
 *Procedural macros* allow creating syntax extensions as execution of a function.
 Procedural macros come in one of three flavors:
 
@@ -11,8 +14,10 @@ Procedural macros allow you to run code at compile time that operates over Rust
 syntax, both consuming and producing Rust syntax. You can sort of think of
 procedural macros as functions from an AST to another AST.
 
-Procedural macros must be defined in a crate with the [crate type] of
+r[macro.proc.def]
+Procedural macros must be defined in the root of a crate with the [crate type] of
 `proc-macro`.
+The macros may not be used from the crate where they are defined, and can only be used when imported in another crate.
 
 > **Note**: When using Cargo, Procedural macro crates are defined with the
 > `proc-macro` key in your manifest:
@@ -22,6 +27,7 @@ Procedural macros must be defined in a crate with the [crate type] of
 > proc-macro = true
 > ```
 
+r[macro.proc.result]
 As functions, they must either return syntax, panic, or loop endlessly. Returned
 syntax either replaces or adds the syntax depending on the kind of procedural
 macro. Panics are caught by the compiler and are turned into a compiler error.
@@ -33,15 +39,20 @@ that the compiler has access to. Similarly, file access is the same. Because
 of this, procedural macros have the same security concerns that [Cargo's
 build scripts] have.
 
+r[macro.proc.error]
 Procedural macros have two ways of reporting errors. The first is to panic. The
 second is to emit a [`compile_error`] macro invocation.
 
 ### The `proc_macro` crate
 
+r[macro.proc.proc_macro]
+
+r[macro.proc.proc_macro.intro]
 Procedural macro crates almost always will link to the compiler-provided
 [`proc_macro` crate]. The `proc_macro` crate provides types required for
 writing procedural macros and facilities to make it easier.
 
+r[macro.proc.proc_macro.token-stream]
 This crate primarily contains a [`TokenStream`] type. Procedural macros operate
 over *token streams* instead of AST nodes, which is a far more stable interface
 over time for both the compiler and for procedural macros to target. A
@@ -50,12 +61,16 @@ can roughly be thought of as lexical token. For example `foo` is an `Ident`
 token, `.` is a `Punct` token, and `1.2` is a `Literal` token. The `TokenStream`
 type, unlike `Vec<TokenTree>`, is cheap to clone.
 
+r[macro.proc.proc_macro.span]
 All tokens have an associated `Span`. A `Span` is an opaque value that cannot
 be modified but can be manufactured. `Span`s represent an extent of source
-code within a program and are primarily used for error reporting. You can modify
-the `Span` of any token.
+code within a program and are primarily used for error reporting. While you
+cannot modify a `Span` itself, you can always change the `Span` *associated*
+with any token, such as through getting a `Span` from another token.
 
 ### Procedural macro hygiene
+
+r[macro.proc.hygiene]
 
 Procedural macros are *unhygienic*. This means they behave as if the output
 token stream was simply written inline to the code it's next to. This means that
@@ -69,13 +84,20 @@ other functions (like `__internal_foo` instead of `foo`).
 
 ### Function-like procedural macros
 
+r[macro.proc.function]
+
+r[macro.proc.function.intro]
 *Function-like procedural macros* are procedural macros that are invoked using
 the macro invocation operator (`!`).
 
+r[macro.proc.function.def]
 These macros are defined by a [public]&#32;[function] with the `proc_macro`
 [attribute] and a signature of `(TokenStream) -> TokenStream`. The input
 [`TokenStream`] is what is inside the delimiters of the macro invocation and the
 output [`TokenStream`] replaces the entire macro invocation.
+
+r[macro.proc.function.namespace]
+The `proc_macro` attribute defines the macro in the [macro namespace] in the root of the crate.
 
 For example, the following macro definition ignores its input and outputs a
 function `answer` into its scope.
@@ -106,6 +128,7 @@ fn main() {
 }
 ```
 
+r[macro.proc.function.invocation]
 Function-like procedural macros may be invoked in any macro invocation
 position, which includes [statements], [expressions], [patterns], [type
 expressions], [item] positions, including items in [`extern` blocks], inherent
@@ -113,13 +136,21 @@ and trait [implementations], and [trait definitions].
 
 ### Derive macros
 
+r[macro.proc.derive]
+
+r[macro.proc.derive.intro]
 *Derive macros* define new inputs for the [`derive` attribute]. These macros
 can create new [items] given the token stream of a [struct], [enum], or [union].
 They can also define [derive macro helper attributes].
 
+r[macro.proc.derive.def]
 Custom derive macros are defined by a [public]&#32;[function] with the
 `proc_macro_derive` attribute and a signature of `(TokenStream) -> TokenStream`.
 
+r[macro.proc.derive.namespace]
+The `proc_macro_derive` attribute defines the custom derive in the [macro namespace] in the root of the crate.
+
+r[macro.proc.derive.output]
 The input [`TokenStream`] is the token stream of the item that has the `derive`
 attribute on it. The output [`TokenStream`] must be a set of items that are
 then appended to the [module] or [block] that the item from the input
@@ -157,11 +188,15 @@ fn main() {
 
 #### Derive macro helper attributes
 
+r[macro.proc.derive.attributes]
+
+r[macro.proc.derive.attributes.intro]
 Derive macros can add additional [attributes] into the scope of the [item]
 they are on. Said attributes are called *derive macro helper attributes*. These
 attributes are [inert], and their only purpose is to be fed into the derive
 macro that defined them. That said, they can be seen by all macros.
 
+r[macro.proc.derive.attributes.def]
 The way to define helper attributes is to put an `attributes` key in the
 `proc_macro_derive` macro with a comma separated list of identifiers that are
 the names of the helper attributes.
@@ -193,10 +228,14 @@ struct Struct {
 
 ### Attribute macros
 
+r[macro.proc.attribute]
+
+r[macro.proc.attribute.intro]
 *Attribute macros* define new [outer attributes][attributes] which can be
 attached to [items], including items in [`extern` blocks], inherent and trait
 [implementations], and [trait definitions].
 
+r[macro.proc.attribute.def]
 Attribute macros are defined by a [public]&#32;[function] with the
 `proc_macro_attribute` [attribute] that has a signature of `(TokenStream,
 TokenStream) -> TokenStream`. The first [`TokenStream`] is the delimited token
@@ -205,6 +244,9 @@ the attribute is written as a bare attribute name, the attribute
 [`TokenStream`] is empty. The second [`TokenStream`] is the rest of the [item]
 including other [attributes] on the [item]. The returned [`TokenStream`]
 replaces the [item] with an arbitrary number of [items].
+
+r[macro.proc.attribute.namespace]
+The `proc_macro_attribute` attribute defines the attribute in the [macro namespace] in the root of the crate.
 
 For example, this attribute macro takes the input stream and returns it as is,
 effectively being the no-op of attributes.
@@ -233,8 +275,8 @@ shown in the comments after the function prefixed with "out:".
 
 #[proc_macro_attribute]
 pub fn show_streams(attr: TokenStream, item: TokenStream) -> TokenStream {
-    println!("attr: \"{}\"", attr.to_string());
-    println!("item: \"{}\"", item.to_string());
+    println!("attr: \"{attr}\"");
+    println!("item: \"{item}\"");
     item
 }
 ```
@@ -250,7 +292,7 @@ use my_macro::show_streams;
 #[show_streams]
 fn invoke1() {}
 // out: attr: ""
-// out: item: "fn invoke1() { }"
+// out: item: "fn invoke1() {}"
 
 // Example: Attribute with input
 #[show_streams(bar)]
@@ -271,17 +313,86 @@ fn invoke4() {}
 // out: item: "fn invoke4() {}"
 ```
 
+### Declarative macro tokens and procedural macro tokens
+
+r[macro.proc.token]
+
+r[macro.proc.token.intro]
+Declarative `macro_rules` macros and procedural macros use similar, but
+different definitions for tokens (or rather [`TokenTree`s].)
+
+r[macro.proc.token.macro_rules]
+Token trees in `macro_rules` (corresponding to `tt` matchers) are defined as
+- Delimited groups (`(...)`, `{...}`, etc)
+- All operators supported by the language, both single-character and
+  multi-character ones (`+`, `+=`).
+    - Note that this set doesn't include the single quote `'`.
+- Literals (`"string"`, `1`, etc)
+    - Note that negation (e.g. `-1`) is never a part of such literal tokens,
+      but a separate operator token.
+- Identifiers, including keywords (`ident`, `r#ident`, `fn`)
+- Lifetimes (`'ident`)
+- Metavariable substitutions in `macro_rules` (e.g. `$my_expr` in
+  `macro_rules! mac { ($my_expr: expr) => { $my_expr } }` after the `mac`'s
+  expansion, which will be considered a single token tree regardless of the
+  passed expression)
+
+r[macro.proc.token.tree]
+Token trees in procedural macros are defined as
+- Delimited groups (`(...)`, `{...}`, etc)
+- All punctuation characters used in operators supported by the language (`+`,
+  but not `+=`), and also the single quote `'` character (typically used in
+  lifetimes, see below for lifetime splitting and joining behavior)
+- Literals (`"string"`, `1`, etc)
+    - Negation (e.g. `-1`) is supported as a part of integer
+      and floating point literals.
+- Identifiers, including keywords (`ident`, `r#ident`, `fn`)
+
+r[macro.proc.token.conversion.intro]
+Mismatches between these two definitions are accounted for when token streams
+are passed to and from procedural macros. \
+Note that the conversions below may happen lazily, so they might not happen if
+the tokens are not actually inspected.
+
+r[macro.proc.token.conversion.to-proc_macro]
+When passed to a proc-macro
+- All multi-character operators are broken into single characters.
+- Lifetimes are broken into a `'` character and an identifier.
+- All metavariable substitutions are represented as their underlying token
+  streams.
+    - Such token streams may be wrapped into delimited groups ([`Group`]) with
+      implicit delimiters ([`Delimiter::None`]) when it's necessary for
+      preserving parsing priorities.
+    - `tt` and `ident` substitutions are never wrapped into such groups and
+      always represented as their underlying token trees.
+
+r[macro.proc.token.conversion.from-proc_macro]
+When emitted from a proc macro
+- Punctuation characters are glued into multi-character operators
+  when applicable.
+- Single quotes `'` joined with identifiers are glued into lifetimes.
+- Negative literals are converted into two tokens (the `-` and the literal)
+  possibly wrapped into a delimited group ([`Group`]) with implicit delimiters
+  ([`Delimiter::None`]) when it's necessary for preserving parsing priorities.
+
+r[macro.proc.token.doc-comment]
+Note that neither declarative nor procedural macros support doc comment tokens
+(e.g. `/// Doc`), so they are always converted to token streams representing
+their equivalent `#[doc = r"str"]` attributes when passed to macros.
+
 [Attribute macros]: #attribute-macros
 [Cargo's build scripts]: ../cargo/reference/build-scripts.html
 [Derive macros]: #derive-macros
 [Function-like macros]: #function-like-procedural-macros
-[`TokenStream`]: ../proc_macro/struct.TokenStream.html
-[`TokenStream`s]: ../proc_macro/struct.TokenStream.html
-[`compile_error`]: ../std/macro.compile_error.html
+[`Delimiter::None`]: proc_macro::Delimiter::None
+[`Group`]: proc_macro::Group
+[`TokenStream`]: proc_macro::TokenStream
+[`TokenStream`s]: proc_macro::TokenStream
+[`TokenTree`s]: proc_macro::TokenTree
 [`derive` attribute]: attributes/derive.md
 [`extern` blocks]: items/external-blocks.md
 [`macro_rules`]: macros-by-example.md
-[`proc_macro` crate]: ../proc_macro/index.html
+[`proc_macro` crate]: proc_macro
 [attribute]: attributes.md
 [attributes]: attributes.md
 [block]: expressions/block-expr.md
@@ -294,6 +405,7 @@ fn invoke4() {}
 [inert]: attributes.md#active-and-inert-attributes
 [item]: items.md
 [items]: items.md
+[macro namespace]: names/namespaces.md
 [module]: items/modules.md
 [patterns]: patterns.md
 [public]: visibility-and-privacy.md

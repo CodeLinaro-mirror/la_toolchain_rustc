@@ -1,5 +1,5 @@
 //! Verification of MIPS MSA intrinsics
-#![allow(bad_style, unused)]
+#![allow(unused, non_upper_case_globals, clippy::single_match)]
 
 // This file is obtained from
 // https://gcc.gnu.org/onlinedocs//gcc/MIPS-SIMD-Architecture-Built-in-Functions.html
@@ -16,6 +16,7 @@ struct Function {
     file: &'static str,
     required_const: &'static [usize],
     has_test: bool,
+    doc: &'static str,
 }
 
 static F16: Type = Type::PrimFloat(16);
@@ -125,7 +126,7 @@ impl<'a> From<&'a str> for MsaTy {
             "u64" => MsaTy::u64,
             "void" => MsaTy::Void,
             "void *" => MsaTy::MutVoidPtr,
-            v => panic!("unknown ty: \"{}\"", v),
+            v => panic!("unknown ty: \"{v}\""),
         }
     }
 }
@@ -163,7 +164,7 @@ impl std::convert::TryFrom<&'static str> for MsaIntrinsic {
             let mut arg_tys = Vec::new();
 
             let last_parentheses = line.find(')')?;
-            for arg in (&line[first_parentheses + 1..last_parentheses]).split(',') {
+            for arg in line[first_parentheses + 1..last_parentheses].split(',') {
                 let arg = arg.trim();
                 arg_tys.push(MsaTy::from(arg));
             }
@@ -198,8 +199,8 @@ fn verify_all_signatures() {
         }
 
         use std::convert::TryFrom;
-        let intrinsic: MsaIntrinsic = TryFrom::try_from(line)
-            .unwrap_or_else(|_| panic!("failed to parse line: \"{}\"", line));
+        let intrinsic: MsaIntrinsic =
+            TryFrom::try_from(line).unwrap_or_else(|_| panic!("failed to parse line: \"{line}\""));
         assert!(!intrinsics.contains_key(&intrinsic.id));
         intrinsics.insert(intrinsic.id.clone(), intrinsic);
     }
@@ -253,7 +254,7 @@ fn verify_all_signatures() {
 
         if let Err(e) = matches(rust, mips) {
             println!("failed to verify `{}`", rust.name);
-            println!("  * {}", e);
+            println!("  * {e}");
             all_valid = false;
         }
     }
@@ -345,8 +346,8 @@ fn matches(rust: &Function, mips: &MsaIntrinsic) -> Result<(), String> {
 
     if !rust.instrs.is_empty() {
         // Normalize slightly to get rid of assembler differences
-        let actual = rust.instrs[0].replace(".", "_");
-        let expected = mips.instruction.replace(".", "_");
+        let actual = rust.instrs[0].replace('.', "_");
+        let expected = mips.instruction.replace('.', "_");
         if actual != expected {
             bail!(
                 "wrong instruction: \"{}\" != \"{}\"",

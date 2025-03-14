@@ -2,7 +2,7 @@ use super::features::{CliFeatures, RequestedFeatures};
 use crate::core::{Dependency, PackageId, Summary};
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
-use crate::util::Config;
+use crate::util::GlobalContext;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -15,6 +15,9 @@ pub struct ResolverProgress {
     time_to_print: Duration,
     printed: bool,
     deps_time: Duration,
+    /// Provides an escape hatch for machine with slow CPU for debugging and
+    /// testing Cargo itself.
+    /// See [rust-lang/cargo#6596](https://github.com/rust-lang/cargo/pull/6596) for more.
     #[cfg(debug_assertions)]
     slow_cpu_multiplier: u64,
 }
@@ -31,13 +34,16 @@ impl ResolverProgress {
             // Architectures that do not have a modern processor, hardware emulation, etc.
             // In the test code we have `slow_cpu_multiplier`, but that is not accessible here.
             #[cfg(debug_assertions)]
+            // ALLOWED: For testing cargo itself only. However, it was communicated as an public
+            // interface to other developers, so keep it as-is, shouldn't add `__CARGO` prefix.
+            #[allow(clippy::disallowed_methods)]
             slow_cpu_multiplier: std::env::var("CARGO_TEST_SLOW_CPU_MULTIPLIER")
                 .ok()
                 .and_then(|m| m.parse().ok())
                 .unwrap_or(1),
         }
     }
-    pub fn shell_status(&mut self, config: Option<&Config>) -> CargoResult<()> {
+    pub fn shell_status(&mut self, gctx: Option<&GlobalContext>) -> CargoResult<()> {
         // If we spend a lot of time here (we shouldn't in most cases) then give
         // a bit of a visual indicator as to what we're doing. Only enable this
         // when stderr is a tty (a human is likely to be watching) to ensure we
@@ -48,7 +54,7 @@ impl ResolverProgress {
         // like `Instant::now` by only checking every N iterations of this loop
         // to amortize the cost of the current time lookup.
         self.ticks += 1;
-        if let Some(config) = config {
+        if let Some(config) = gctx {
             if config.shell().is_err_tty()
                 && !self.printed
                 && self.ticks % 1000 == 0
@@ -63,7 +69,7 @@ impl ResolverProgress {
             // The largest test in our suite takes less then 5000 ticks
             // with all the algorithm improvements.
             // If any of them are removed then it takes more than I am willing to measure.
-            // So lets fail the test fast if we have ben running for two long.
+            // So lets fail the test fast if we have been running for too long.
             assert!(
                 self.ticks < 50_000,
                 "got to 50_000 ticks in {:?}",
@@ -72,7 +78,7 @@ impl ResolverProgress {
             // The largest test in our suite takes less then 30 sec
             // with all the improvements to how fast a tick can go.
             // If any of them are removed then it takes more than I am willing to measure.
-            // So lets fail the test fast if we have ben running for two long.
+            // So lets fail the test fast if we have been running for too long.
             if self.ticks % 1000 == 0 {
                 assert!(
                     self.start.elapsed() - self.deps_time
@@ -105,6 +111,8 @@ pub enum ResolveBehavior {
     V1,
     /// V2 adds the new feature resolver.
     V2,
+    /// V3 changes version preferences
+    V3,
 }
 
 impl ResolveBehavior {
@@ -112,6 +120,7 @@ impl ResolveBehavior {
         match resolver {
             "1" => Ok(ResolveBehavior::V1),
             "2" => Ok(ResolveBehavior::V2),
+            "3" => Ok(ResolveBehavior::V3),
             s => anyhow::bail!(
                 "`resolver` setting `{}` is not valid, valid options are \"1\" or \"2\"",
                 s
@@ -119,11 +128,13 @@ impl ResolveBehavior {
         }
     }
 
-    pub fn to_manifest(&self) -> Option<String> {
+    pub fn to_manifest(&self) -> String {
         match self {
-            ResolveBehavior::V1 => None,
-            ResolveBehavior::V2 => Some("2".to_string()),
+            ResolveBehavior::V1 => "1",
+            ResolveBehavior::V2 => "2",
+            ResolveBehavior::V3 => "3",
         }
+        .to_owned()
     }
 }
 
@@ -278,7 +289,7 @@ pub enum ConflictReason {
     /// A dependency listed features that weren't actually available on the
     /// candidate. For example we tried to activate feature `foo` but the
     /// candidate we're activating didn't actually have the feature `foo`.
-    MissingFeatures(String),
+    MissingFeatures(InternedString),
 
     /// A dependency listed a feature that ended up being a required dependency.
     /// For example we tried to activate feature `foo` but the
@@ -289,12 +300,6 @@ pub enum ConflictReason {
     /// A dependency listed a feature for an optional dependency, but that
     /// optional dependency is "hidden" using namespaced `dep:` syntax.
     NonImplicitDependencyAsFeature(InternedString),
-
-    // TODO: needs more info for `activation_error`
-    // TODO: needs more info for `find_candidate`
-    /// pub dep error
-    PublicDependency(PackageId),
-    PubliclyExports(PackageId),
 }
 
 impl ConflictReason {
@@ -308,13 +313,6 @@ impl ConflictReason {
 
     pub fn is_required_dependency_as_features(&self) -> bool {
         matches!(self, ConflictReason::RequiredDependencyAsFeature(_))
-    }
-
-    pub fn is_public_dependency(&self) -> bool {
-        matches!(
-            self,
-            ConflictReason::PublicDependency(_) | ConflictReason::PubliclyExports(_)
-        )
     }
 }
 

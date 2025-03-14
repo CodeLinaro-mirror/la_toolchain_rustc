@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use dot::{Id, LabelText};
 use ide_db::{
-    base_db::{CrateGraph, CrateId, Dependency, SourceDatabase, SourceDatabaseExt},
-    RootDatabase,
+    base_db::{CrateGraph, CrateId, Dependency, SourceDatabase, SourceRootDatabase},
+    FxHashSet, RootDatabase,
 };
-use rustc_hash::FxHashSet;
+use triomphe::Arc;
 
 // Feature: View Crate Graph
 //
@@ -17,7 +15,7 @@ use rustc_hash::FxHashSet;
 // |===
 // | Editor  | Action Name
 //
-// | VS Code | **Rust Analyzer: View Crate Graph**
+// | VS Code | **rust-analyzer: View Crate Graph**
 // |===
 pub(crate) fn view_crate_graph(db: &RootDatabase, full: bool) -> Result<String, String> {
     let crate_graph = db.crate_graph();
@@ -80,7 +78,7 @@ impl<'a> dot::Labeller<'a, CrateId, Edge<'a>> for DotCrateGraph {
     }
 
     fn node_id(&'a self, n: &CrateId) -> Id<'a> {
-        Id::new(format!("_{}", n.0)).unwrap()
+        Id::new(format!("_{}", u32::from(n.into_raw()))).unwrap()
     }
 
     fn node_shape(&'a self, _node: &CrateId) -> Option<LabelText<'a>> {
@@ -88,7 +86,7 @@ impl<'a> dot::Labeller<'a, CrateId, Edge<'a>> for DotCrateGraph {
     }
 
     fn node_label(&'a self, n: &CrateId) -> LabelText<'a> {
-        let name = self.graph[*n].display_name.as_ref().map_or("(unnamed crate)", |name| &*name);
+        let name = self.graph[*n].display_name.as_ref().map_or("(unnamed crate)", |name| name);
         LabelText::LabelStr(name.into())
     }
 }

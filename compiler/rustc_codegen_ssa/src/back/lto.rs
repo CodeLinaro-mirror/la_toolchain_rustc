@@ -1,12 +1,12 @@
-use super::write::CodegenContext;
-use crate::traits::*;
-use crate::ModuleCodegen;
+use std::ffi::CString;
+use std::sync::Arc;
 
 use rustc_data_structures::memmap::Mmap;
 use rustc_errors::FatalError;
 
-use std::ffi::CString;
-use std::sync::Arc;
+use super::write::CodegenContext;
+use crate::ModuleCodegen;
+use crate::traits::*;
 
 pub struct ThinModule<B: WriteBackendMethods> {
     pub shared: Arc<ThinShared<B>>,
@@ -41,18 +41,14 @@ pub struct ThinShared<B: WriteBackendMethods> {
 }
 
 pub enum LtoModuleCodegen<B: WriteBackendMethods> {
-    Fat {
-        module: Option<ModuleCodegen<B::Module>>,
-        _serialized_bitcode: Vec<SerializedModule<B::ModuleBuffer>>,
-    },
-
+    Fat(ModuleCodegen<B::Module>),
     Thin(ThinModule<B>),
 }
 
 impl<B: WriteBackendMethods> LtoModuleCodegen<B> {
     pub fn name(&self) -> &str {
         match *self {
-            LtoModuleCodegen::Fat { .. } => "everything",
+            LtoModuleCodegen::Fat(_) => "everything",
             LtoModuleCodegen::Thin(ref m) => m.name(),
         }
     }
@@ -64,19 +60,15 @@ impl<B: WriteBackendMethods> LtoModuleCodegen<B> {
     /// It's intended that the module returned is immediately code generated and
     /// dropped, and then this LTO module is dropped.
     pub unsafe fn optimize(
-        &mut self,
+        self,
         cgcx: &CodegenContext<B>,
     ) -> Result<ModuleCodegen<B::Module>, FatalError> {
-        match *self {
-            LtoModuleCodegen::Fat { ref mut module, .. } => {
-                let module = module.take().unwrap();
-                {
-                    let config = cgcx.config(module.kind);
-                    B::run_lto_pass_manager(cgcx, &module, config, false)?;
-                }
+        match self {
+            LtoModuleCodegen::Fat(mut module) => {
+                B::optimize_fat(cgcx, &mut module)?;
                 Ok(module)
             }
-            LtoModuleCodegen::Thin(ref mut thin) => B::optimize_thin(cgcx, thin),
+            LtoModuleCodegen::Thin(thin) => unsafe { B::optimize_thin(cgcx, thin) },
         }
     }
 
@@ -85,7 +77,7 @@ impl<B: WriteBackendMethods> LtoModuleCodegen<B> {
     pub fn cost(&self) -> u64 {
         match *self {
             // Only one module with fat LTO, so the cost doesn't matter.
-            LtoModuleCodegen::Fat { .. } => 0,
+            LtoModuleCodegen::Fat(_) => 0,
             LtoModuleCodegen::Thin(ref m) => m.cost(),
         }
     }

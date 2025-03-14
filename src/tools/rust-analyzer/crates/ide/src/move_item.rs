@@ -1,7 +1,7 @@
 use std::{iter::once, mem};
 
 use hir::Semantics;
-use ide_db::{base_db::FileRange, helpers::pick_best_token, RootDatabase};
+use ide_db::{helpers::pick_best_token, FileRange, RootDatabase};
 use itertools::Itertools;
 use syntax::{algo, ast, match_ast, AstNode, SyntaxElement, SyntaxKind, SyntaxNode, TextRange};
 use text_edit::{TextEdit, TextEditBuilder};
@@ -19,8 +19,8 @@ pub enum Direction {
 // |===
 // | Editor  | Action Name
 //
-// | VS Code | **Rust Analyzer: Move item up**
-// | VS Code | **Rust Analyzer: Move item down**
+// | VS Code | **rust-analyzer: Move item up**
+// | VS Code | **rust-analyzer: Move item down**
 // |===
 //
 // image::https://user-images.githubusercontent.com/48062697/113065576-04298180-91b1-11eb-91ce-4505e99ed598.gif[]
@@ -30,7 +30,7 @@ pub(crate) fn move_item(
     direction: Direction,
 ) -> Option<TextEdit> {
     let sema = Semantics::new(db);
-    let file = sema.parse(range.file_id);
+    let file = sema.parse_guess_edition(range.file_id);
 
     let item = if range.range.is_empty() {
         SyntaxElement::Token(pick_best_token(
@@ -73,6 +73,7 @@ fn find_ancestors(item: SyntaxElement, direction: Direction, range: TextRange) -
         SyntaxKind::MACRO_CALL,
         SyntaxKind::TYPE_ALIAS,
         SyntaxKind::TRAIT,
+        SyntaxKind::TRAIT_ALIAS,
         SyntaxKind::IMPL,
         SyntaxKind::MACRO_DEF,
         SyntaxKind::STRUCT,

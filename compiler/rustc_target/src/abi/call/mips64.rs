@@ -6,7 +6,7 @@ use crate::abi::{self, HasDataLayout, Size, TyAbiInterface};
 fn extend_integer_width_mips<Ty>(arg: &mut ArgAbi<'_, Ty>, bits: u64) {
     // Always sign extend u32 values on 64-bit mips
     if let abi::Abi::Scalar(scalar) = arg.layout.abi {
-        if let abi::Int(i, signed) = scalar.value {
+        if let abi::Int(i, signed) = scalar.primitive() {
             if !signed && i.size().bits() == 32 {
                 if let PassMode::Direct(ref mut attrs) = arg.mode {
                     attrs.ext(ArgExtension::Sext);
@@ -25,9 +25,9 @@ where
     C: HasDataLayout,
 {
     match ret.layout.field(cx, i).abi {
-        abi::Abi::Scalar(scalar) => match scalar.value {
-            abi::F32 => Some(Reg::f32()),
-            abi::F64 => Some(Reg::f64()),
+        abi::Abi::Scalar(scalar) => match scalar.primitive() {
+            abi::Float(abi::F32) => Some(Reg::f32()),
+            abi::Float(abi::F64) => Some(Reg::f64()),
             _ => None,
         },
         _ => None,
@@ -68,7 +68,7 @@ where
         }
 
         // Cast to a uniform int structure
-        ret.cast_to(Uniform { unit: Reg::i64(), total: size });
+        ret.cast_to(Uniform::new(Reg::i64(), size));
     } else {
         ret.make_indirect();
     }
@@ -110,7 +110,7 @@ where
 
                 // We only care about aligned doubles
                 if let abi::Abi::Scalar(scalar) = field.abi {
-                    if let abi::F64 = scalar.value {
+                    if scalar.primitive() == abi::Float(abi::F64) {
                         if offset.is_aligned(dl.f64_align.abi) {
                             // Insert enough integers to cover [last_offset, offset)
                             assert!(last_offset.is_aligned(dl.f64_align.abi));
@@ -139,7 +139,7 @@ where
     let rest_size = size - Size::from_bytes(8) * prefix_index as u64;
     arg.cast_to(CastTarget {
         prefix,
-        rest: Uniform { unit: Reg::i64(), total: rest_size },
+        rest: Uniform::new(Reg::i64(), rest_size),
         attrs: ArgAttributes {
             regular: ArgAttribute::default(),
             arg_ext: ArgExtension::None,
@@ -149,7 +149,7 @@ where
     });
 }
 
-pub fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>)
+pub(crate) fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>)
 where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout,
@@ -158,7 +158,7 @@ where
         classify_ret(cx, &mut fn_abi.ret);
     }
 
-    for arg in &mut fn_abi.args {
+    for arg in fn_abi.args.iter_mut() {
         if arg.is_ignore() {
             continue;
         }

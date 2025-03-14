@@ -114,13 +114,21 @@ installed. For example, on Ubuntu, run `sudo apt install gcc-multilib` to
 install the necessary libraries.
 ",
         );
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        message.push_str(
+            "
+macOS on aarch64 cross tests to target x86_64-apple-darwin.
+This should be natively supported via Xcode, nothing additional besides the
+rustup target should be needed.
+",
+        );
     } else if cfg!(target_os = "macos") {
         message.push_str(
             "
-macOS cross tests target x86_64-apple-ios, which requires the iOS SDK to be
-installed. This should be included with Xcode automatically. If you are using
-the Xcode command line tools, you'll need to install the full Xcode app (from
-the Apple App Store), and switch to it with this command:
+macOS on x86_64 cross tests to target x86_64-apple-ios, which requires the iOS
+SDK to be installed. This should be included with Xcode automatically. If you
+are using the Xcode command line tools, you'll need to install the full Xcode
+app (from the Apple App Store), and switch to it with this command:
 
     sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
 
@@ -191,6 +199,7 @@ pub fn native_arch() -> &'static str {
         .expect("Target triple has unexpected format")
     {
         "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
         "i686" => "x86",
         _ => panic!("This test should be gated on cross_compile::disabled."),
     }
@@ -200,16 +209,23 @@ pub fn native_arch() -> &'static str {
 ///
 /// Only use this function on tests that check `cross_compile::disabled`.
 pub fn alternate() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "x86_64-apple-ios"
+    try_alternate().expect("This test should be gated on cross_compile::disabled.")
+}
+
+/// A possible alternate target-triple to build with.
+pub(crate) fn try_alternate() -> Option<&'static str> {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("x86_64-apple-darwin")
+    } else if cfg!(target_os = "macos") {
+        Some("x86_64-apple-ios")
     } else if cfg!(target_os = "linux") {
-        "i686-unknown-linux-gnu"
+        Some("i686-unknown-linux-gnu")
     } else if cfg!(all(target_os = "windows", target_env = "msvc")) {
-        "i686-pc-windows-msvc"
+        Some("i686-pc-windows-msvc")
     } else if cfg!(all(target_os = "windows", target_env = "gnu")) {
-        "i686-pc-windows-gnu"
+        Some("i686-pc-windows-gnu")
     } else {
-        panic!("This test should be gated on cross_compile::disabled.");
+        None
     }
 }
 

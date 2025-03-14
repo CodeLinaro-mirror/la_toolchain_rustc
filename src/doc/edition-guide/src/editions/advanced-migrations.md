@@ -55,7 +55,7 @@ Sometimes the fixes suggested by the compiler may fail to work.
 When this happens, Cargo will report a warning indicating what happened and what the error was.
 However, by default it will automatically back out the changes it made.
 It can be helpful to keep the code in the broken state and manually resolve the issue.
-Some of the fixes may have been correct, and the broken fix maybe be *mostly* correct, but just need minor tweaking.
+Some of the fixes may have been correct, and the broken fix may be *mostly* correct, but just need minor tweaking.
 
 In this situation, use the `--broken-code` option with `cargo fix` to tell Cargo not to back out the changes.
 Then, you can go manually inspect the error and investigate what is needed to fix it.
@@ -190,7 +190,7 @@ We're now more idiomatic, and we didn't have to fix our code manually!
 [`cargo fix`]: ../../cargo/commands/cargo-fix.html
 [`explicit-outlives-requirements`]:  ../../rustc/lints/listing/allowed-by-default.html#explicit-outlives-requirements
 [`keyword-idents`]: ../../rustc/lints/listing/allowed-by-default.html#keyword-idents
-[`rustfix`]: https://github.com/rust-lang/rustfix
+[`rustfix`]: https://crates.io/crates/rustfix
 [`unused-extern-crates`]: ../../rustc/lints/listing/allowed-by-default.html#unused-extern-crates
 [Cargo features]: ../../cargo/reference/features.html
 [Cargo package]: ../../cargo/reference/manifest.html#the-package-section
@@ -206,5 +206,5 @@ We're now more idiomatic, and we didn't have to fix our code manually!
 [proc macros]: ../../reference/procedural-macros.html
 [Rust Analyzer extension]: https://marketplace.visualstudio.com/items?itemName=matklad.rust-analyzer
 [rustdoc-annotation]: ../../rustdoc/documentation-tests.html#attributes
-[rustfix-examples]: https://github.com/rust-lang/rustfix/tree/master/examples
+[rustfix-examples]: https://github.com/rust-lang/cargo/tree/master/crates/rustfix/examples
 [Visual Studio Code]: https://code.visualstudio.com/
