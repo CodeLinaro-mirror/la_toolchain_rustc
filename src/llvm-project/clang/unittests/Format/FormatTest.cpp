@@ -9614,6 +9614,10 @@ TEST_F(FormatTest, AlignsAfterOpenBracket) {
                "        auto aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
                "    ) {};",
                Style);
+  verifyFormat("aaaaaaaaaaaaaaaaaaaaaaaa(\n"
+               "    &bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+               ");",
+               Style);
 }
 
 TEST_F(FormatTest, ParenthesesAndOperandAlignment) {
@@ -13958,6 +13962,8 @@ TEST_F(FormatTest, IncorrectCodeUnbalancedBraces) {
   verifyNoCrash("struct Foo {\n"
                 "  operator foo(bar\n"
                 "};");
+  verifyNoCrash("decltype( {\n"
+                "  {");
 }
 
 TEST_F(FormatTest, IncorrectUnbalancedBracesInMacrosWithUnicode) {
@@ -25067,8 +25073,10 @@ TEST_F(FormatTest, AlternativeOperators) {
   verifyFormat("%:define ABC abc"); // #define ABC abc
   verifyFormat("%:%:");             // ##
 
+  verifyFormat("return not ::f();");
+  verifyFormat("return not *foo;");
+
   verifyFormat("a = v(not;);\n"
-               "b = v(not+);\n"
                "c = v(not x);\n"
                "d = v(not 1);\n"
                "e = v(not 123.f);");
@@ -25076,7 +25084,6 @@ TEST_F(FormatTest, AlternativeOperators) {
   verifyNoChange("#define ASSEMBLER_INSTRUCTION_LIST(V)  \\\n"
                  "  V(and)                               \\\n"
                  "  V(not)                               \\\n"
-                 "  V(not!)                              \\\n"
                  "  V(other)",
                  getLLVMStyleWithColumns(40));
 }
@@ -27890,6 +27897,8 @@ TEST_F(FormatTest, RemoveParentheses) {
   verifyFormat("return ((... && std::is_convertible_v<TArgsLocal, TArgs>));",
                "return (((... && std::is_convertible_v<TArgsLocal, TArgs>)));",
                Style);
+  verifyFormat("MOCK_METHOD(void, Function, (), override);",
+               "MOCK_METHOD(void, Function, (), (override));", Style);
 
   Style.RemoveParentheses = FormatStyle::RPS_ReturnStatement;
   verifyFormat("#define Return0 return (0);", Style);
