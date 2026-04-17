@@ -282,75 +282,9 @@ static inline bool OnlyUsedInOMP(AllocaInst *AI) {
   return true;
 }
 
-bool anyJuliaObjects(Type *T) {
-  if (isSpecialPtr(T))
-    return true;
-  if (auto ST = dyn_cast<StructType>(T)) {
-    for (auto elem : ST->elements()) {
-      if (anyJuliaObjects(elem))
-        return true;
-    }
-    return false;
-  }
-  if (auto AT = dyn_cast<ArrayType>(T)) {
-    return anyJuliaObjects(AT->getElementType());
-  }
-  if (auto VT = dyn_cast<VectorType>(T)) {
-    return anyJuliaObjects(VT->getElementType());
-  }
-  return false;
-}
-
-SmallVector<Value *, 1> getJuliaObjects(Value *v, IRBuilder<> &B) {
-  SmallVector<Value *, 1> todo = {v};
-  SmallVector<Value *, 1> done;
-  while (todo.size()) {
-    auto cur = todo.pop_back_val();
-    auto T = cur->getType();
-    if (!anyJuliaObjects(T)) {
-      continue;
-    }
-    if (isSpecialPtr(T)) {
-      done.push_back(cur);
-      continue;
-    }
-    if (auto ST = dyn_cast<StructType>(T)) {
-      for (auto en : llvm::enumerate(ST->elements())) {
-        if (anyJuliaObjects(en.value())) {
-          auto V2 = B.CreateExtractValue(cur, en.index());
-          todo.push_back(V2);
-        }
-      }
-      continue;
-    }
-    if (auto AT = dyn_cast<ArrayType>(T)) {
-      for (size_t i = 0; i < AT->getNumElements(); i++) {
-        todo.push_back(B.CreateExtractValue(cur, i));
-      }
-      continue;
-    }
-    if (auto VT = dyn_cast<VectorType>(T)) {
-      assert(!VT->getElementCount().isScalable());
-      size_t numElems = VT->getElementCount().getKnownMinValue();
-      for (size_t i = 0; i < numElems; i++) {
-        todo.push_back(B.CreateExtractElement(cur, i));
-      }
-      continue;
-    }
-    llvm_unreachable("unknown source of julia type");
-  }
-  return done;
-}
-
-void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
-  SmallVector<std::tuple<Value *, Value *, Instruction *>, 1> Todo;
-  for (auto U : AI->users()) {
-    Todo.push_back(
-        std::make_tuple((Value *)rep, (Value *)AI, cast<Instruction>(U)));
-  }
-  SmallVector<Instruction *, 1> toErase;
-  if (auto I = dyn_cast<Instruction>(AI))
-    toErase.push_back(I);
+void RecursivelyReplaceAddressSpace(
+    SmallVector<std::tuple<Value *, Value *, Instruction *>, 1> &Todo,
+    SmallVector<Instruction *, 1> &toErase, bool legal) {
   SmallVector<StoreInst *, 1> toPostCache;
   while (Todo.size()) {
     auto cur = Todo.back();
@@ -384,15 +318,20 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
         continue;
       }
       IRBuilder<> B(CI);
-      auto nCI0 = B.CreateCast(
-          CI->getOpcode(), rep,
+      Type *resTy;
 #if LLVM_VERSION_MAJOR < 17
-          PointerType::get(CI->getType()->getPointerElementType(),
-                           cast<PointerType>(rep->getType())->getAddressSpace())
+      if (CI->getContext().supportsTypedPointers()) {
+        resTy = PointerType::get(
+            CI->getType()->getPointerElementType(),
+            cast<PointerType>(rep->getType())->getAddressSpace());
+      } else {
+        resTy = rep->getType();
+      }
 #else
-          rep->getType()
+      resTy = rep->getType();
 #endif
-      );
+
+      auto nCI0 = B.CreateCast(CI->getOpcode(), rep, resTy);
       if (auto nCI = dyn_cast<CastInst>(nCI0))
         nCI->takeName(CI);
       for (auto U : CI->users()) {
@@ -406,14 +345,18 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
       IRBuilder<> B(GEP);
       if (EnzymeJuliaAddrLoad &&
           cast<PointerType>(rep->getType())->getAddressSpace() == 10) {
-        rep = B.CreateAddrSpaceCast(
-            rep,
+
+        Type *resTy;
 #if LLVM_VERSION_MAJOR < 17
-            PointerType::get(rep->getType()->getPointerElementType(), 11)
+        if (GEP->getContext().supportsTypedPointers()) {
+          resTy = PointerType::get(rep->getType()->getPointerElementType(), 11);
+        } else {
+          resTy = PointerType::get(rep->getContext(), 11);
+        }
 #else
-            PointerType::get(rep->getContext(), 11)
+        resTy = PointerType::get(rep->getContext(), 11);
 #endif
-        );
+        rep = B.CreateAddrSpaceCast(rep, resTy);
       }
       SmallVector<Value *, 1> ind(GEP->indices());
       auto nGEP = cast<GetElementPtrInst>(
@@ -432,6 +375,7 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
       for (size_t i = 0; i < NumOperands; i++)
         if (P->getOperand(i) == prev)
           replacedOperands[i] = rep;
+
       for (auto tval : Todo) {
         if (std::get<2>(tval) != P)
           continue;
@@ -456,7 +400,6 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
         }
         if (!remainingArePHIs) {
           Todo.insert(Todo.begin(), cur);
-          llvm::errs() << " continuing\n";
           continue;
         }
       } else {
@@ -511,14 +454,17 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
       if (EnzymeJuliaAddrLoad &&
           cast<PointerType>(rep->getType())->getAddressSpace() == 10) {
         IRBuilder<> B(LI);
-        rep = B.CreateAddrSpaceCast(
-            rep,
+        Type *resTy;
 #if LLVM_VERSION_MAJOR < 17
-            PointerType::get(rep->getType()->getPointerElementType(), 11)
+        if (LI->getContext().supportsTypedPointers()) {
+          resTy = PointerType::get(rep->getType()->getPointerElementType(), 11);
+        } else {
+          resTy = PointerType::get(rep->getContext(), 11);
+        }
 #else
-            PointerType::get(rep->getContext(), 11)
+        resTy = PointerType::get(rep->getContext(), 11);
 #endif
-        );
+        rep = B.CreateAddrSpaceCast(rep, resTy);
       }
       LI->setOperand(0, rep);
       continue;
@@ -528,14 +474,18 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
         if (EnzymeJuliaAddrLoad &&
             cast<PointerType>(rep->getType())->getAddressSpace() == 10) {
           IRBuilder<> B(SI);
-          rep = B.CreateAddrSpaceCast(
-              rep,
+          Type *resTy;
 #if LLVM_VERSION_MAJOR < 17
-              PointerType::get(rep->getType()->getPointerElementType(), 11)
+          if (SI->getContext().supportsTypedPointers()) {
+            resTy =
+                PointerType::get(rep->getType()->getPointerElementType(), 11);
+          } else {
+            resTy = PointerType::get(rep->getContext(), 11);
+          }
 #else
-              PointerType::get(rep->getContext(), 11)
+          resTy = PointerType::get(rep->getContext(), 11);
 #endif
-          );
+          rep = B.CreateAddrSpaceCast(rep, resTy);
         }
         SI->setOperand(1, rep);
         if (EnzymeJuliaAddrLoad &&
@@ -547,7 +497,8 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
           if (subvals.size()) {
             auto JLT =
                 PointerType::get(StructType::get(SI->getContext(), {}), 10);
-            auto FT = FunctionType::get(JLT, {}, true);
+            auto FT = FunctionType::get(Type::getVoidTy(rep->getContext()),
+                                        {JLT}, true);
             auto wb = B.GetInsertBlock()
                           ->getParent()
                           ->getParent()
@@ -639,9 +590,23 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
         continue;
       }
     }
-    if (auto I = dyn_cast<Instruction>(inst))
-      llvm::errs() << *I->getParent()->getParent() << "\n";
-    llvm::errs() << " inst: " << *inst << "\n";
+
+    std::string s;
+    llvm::raw_string_ostream ss(s);
+    ss << "Illegal address space propagation\n";
+    ss << " + rep: " << *rep << "\n";
+    ss << " + prev: " << *prev << "\n";
+    ss << " + inst: " << *inst << "\n";
+
+    if (CustomErrorHandler) {
+      CustomErrorHandler(s.c_str(), wrap(inst), ErrorType::InternalError,
+                         nullptr, nullptr, nullptr);
+    } else {
+      auto instI = cast<Instruction>(inst);
+      ss << *instI->getParent()->getParent() << "\n";
+      EmitFailure("IllegalAddressSpacePropagation", instI->getDebugLoc(), instI,
+                  ss.str());
+    }
     llvm_unreachable("Illegal address space propagation");
   }
 
@@ -652,6 +617,18 @@ void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
     IRBuilder<> B(SI->getNextNode());
     PostCacheStore(SI, B);
   }
+}
+
+void RecursivelyReplaceAddressSpace(Value *AI, Value *rep, bool legal) {
+  SmallVector<std::tuple<Value *, Value *, Instruction *>, 1> Todo;
+  for (auto U : AI->users()) {
+    Todo.push_back(
+        std::make_tuple((Value *)rep, (Value *)AI, cast<Instruction>(U)));
+  }
+  SmallVector<Instruction *, 1> toErase;
+  if (auto I = dyn_cast<Instruction>(AI))
+    toErase.push_back(I);
+  RecursivelyReplaceAddressSpace(Todo, toErase, legal);
 }
 
 /// Convert necessary stack allocations into mallocs for use in the reverse
@@ -684,6 +661,8 @@ UpgradeAllocasToMallocs(Function *NewF, DerivativeMode mode,
   Function *end_lifetime = nullptr;
 #endif
 
+  SmallVector<std::tuple<Value *, Value *, Instruction *>, 1> Todo;
+  SmallVector<Instruction *, 1> toErase;
   for (auto AI : ToConvert) {
     std::string nam = AI->getName().str();
     AI->setName("");
@@ -755,11 +734,17 @@ UpgradeAllocasToMallocs(Function *NewF, DerivativeMode mode,
     CI->setMetadata(
         "enzyme_fromstack",
         MDNode::get(CI->getContext(),
-                    {ConstantAsMetadata::get(ConstantInt::get(
-                        IntegerType::get(AI->getContext(), 64), align))}));
+                    {
+                        ConstantAsMetadata::get(ConstantInt::get(
+                            IntegerType::get(AI->getContext(), 64), align)),
+                        ConstantAsMetadata::get(ConstantInt::get(
+                            IntegerType::get(AI->getContext(), 64),
+                            (size_t)AI->getAllocatedType())),
+                    }));
 
     for (auto MD : {"enzyme_active", "enzyme_inactive", "enzyme_type",
-                    "enzymejl_allocart", "enzymejl_allocart_name"})
+                    "enzymejl_allocart", "enzymejl_allocart_name",
+                    "enzymejl_gc_alloc_rt"})
       if (auto M = AI->getMetadata(MD))
         CI->setMetadata(MD, M);
 
@@ -775,13 +760,19 @@ UpgradeAllocasToMallocs(Function *NewF, DerivativeMode mode,
     auto PT0 = cast<PointerType>(rep->getType());
     auto PT1 = cast<PointerType>(AI->getType());
     if (PT0->getAddressSpace() != PT1->getAddressSpace()) {
-      RecursivelyReplaceAddressSpace(AI, rep, /*legal*/ false);
+      for (auto U : AI->users()) {
+        Todo.push_back(
+            std::make_tuple((Value *)rep, (Value *)AI, cast<Instruction>(U)));
+      }
+      if (auto I = dyn_cast<Instruction>(AI))
+        toErase.push_back(I);
     } else {
       assert(rep->getType() == AI->getType());
       AI->replaceAllUsesWith(rep);
       AI->eraseFromParent();
     }
   }
+  RecursivelyReplaceAddressSpace(Todo, toErase, /*legal*/ false);
 }
 
 // Create a stack variable containing the size of the allocation
@@ -1072,8 +1063,9 @@ void PreProcessCache::LowerAllocAddr(Function *NewF) {
     auto AI = cast<AllocaInst>(T0);
     llvm::Value *AIV = AI;
 #if LLVM_VERSION_MAJOR < 17
-    if (AIV->getType()->getPointerElementType() !=
-        T->getType()->getPointerElementType()) {
+    if (AIV->getContext().supportsTypedPointers() &&
+        AIV->getType()->getPointerElementType() !=
+            T->getType()->getPointerElementType()) {
       IRBuilder<> B(AI->getNextNode());
       AIV = B.CreateBitCast(
           AIV, PointerType::get(
@@ -1245,8 +1237,12 @@ Function *CreateMPIWrapper(Function *F) {
   std::string name = ("enzyme_wrapmpi$$" + F->getName() + "#").str();
   if (auto W = F->getParent()->getFunction(name))
     return W;
-  Type *types = {F->getFunctionType()->getParamType(0)};
-  auto FT = FunctionType::get(F->getReturnType(), types, false);
+
+  // MPI_Comm_rank(MPI_Comm comm, int *rank)
+  // MPI_Comm_size(MPI_Comm comm, int *size)
+  Type *ReturnType = Type::getInt32Ty(F->getContext());
+  Type *types = {F->getFunctionType()->getParamType(0)}; // MPI_Comm
+  auto FT = FunctionType::get(ReturnType, types, false);
   Function *W = Function::Create(FT, GlobalVariable::InternalLinkage, name,
                                  F->getParent());
   llvm::Attribute::AttrKind attrs[] = {
@@ -1274,7 +1270,7 @@ Function *CreateMPIWrapper(Function *F) {
   W->addFnAttr(Attribute::get(F->getContext(), "enzyme_inactive"));
   BasicBlock *entry = BasicBlock::Create(W->getContext(), "entry", W);
   IRBuilder<> B(entry);
-  auto alloc = B.CreateAlloca(F->getReturnType());
+  auto alloc = B.CreateAlloca(ReturnType);
   Value *args[] = {W->arg_begin(), alloc};
 
   auto T = F->getFunctionType()->getParamType(1);
@@ -1283,7 +1279,7 @@ Function *CreateMPIWrapper(Function *F) {
     args[1] = B.CreatePtrToInt(args[1], T);
   }
   B.CreateCall(F, args);
-  B.CreateRet(B.CreateLoad(F->getReturnType(), alloc));
+  B.CreateRet(B.CreateLoad(ReturnType, alloc));
   return W;
 }
 
@@ -1297,16 +1293,15 @@ static void SimplifyMPIQueries(Function &NewF, FunctionAnalysisManager &FAM) {
         Function *Fn = CI->getCalledFunction();
         if (Fn == nullptr)
           continue;
-        if (Fn->getName() == "MPI_Comm_rank" ||
-            Fn->getName() == "PMPI_Comm_rank" ||
-            Fn->getName() == "MPI_Comm_size" ||
-            Fn->getName() == "PMPI_Comm_size") {
+        auto name = getFuncName(Fn);
+        if (name == "MPI_Comm_rank" || name == "PMPI_Comm_rank" ||
+            name == "MPI_Comm_size" || name == "PMPI_Comm_size") {
           Todo.push_back(CI);
         }
-        if (Fn->getName() == "__kmpc_for_static_init_4" ||
-            Fn->getName() == "__kmpc_for_static_init_4u" ||
-            Fn->getName() == "__kmpc_for_static_init_8" ||
-            Fn->getName() == "__kmpc_for_static_init_8u") {
+        if (name == "__kmpc_for_static_init_4" ||
+            name == "__kmpc_for_static_init_4u" ||
+            name == "__kmpc_for_static_init_8" ||
+            name == "__kmpc_for_static_init_8u") {
           OMPBounds.push_back(CI);
         }
       }
@@ -1351,8 +1346,7 @@ static void SimplifyMPIQueries(Function &NewF, FunctionAnalysisManager &FAM) {
 #endif
     } else {
       assert(isa<IntegerType>(storePointer->getType()));
-      storePointer = B.CreateIntToPtr(storePointer,
-                                      PointerType::getUnqual(res->getType()));
+      storePointer = B.CreateIntToPtr(storePointer, getUnqual(res->getType()));
     }
     if (isa<AllocaInst>(storePointer)) {
       // If this is only loaded from, immedaitely replace
@@ -1665,6 +1659,206 @@ void SplitPHIs(llvm::Function &F) {
   }
 }
 
+// returns if newly changed, subject to the pending calls
+bool DetectPointerArgOfFn(llvm::Function &F,
+                          SmallPtrSetImpl<Function *> &calls_todo) {
+  if (F.empty())
+    return false;
+  bool changed = false;
+  for (auto &arg : F.args()) {
+    if (!arg.getType()->isPointerTy())
+      continue;
+    // Store list of values we need to check
+    std::deque<Value *> todo = {&arg};
+    SmallPtrSet<Value *, 1> seen;
+
+    bool captured = false;
+    bool read = false;
+    bool written = false;
+
+    AttributeList Attrs = arg.getParent()->getAttributes();
+
+    // We have already hit the max state.
+
+    if (Attrs.hasParamAttr(arg.getArgNo(), Attribute::ReadNone) &&
+        arg.hasNoCaptureAttr())
+      continue;
+
+    while (!todo.empty()) {
+      auto cur = todo.back();
+      todo.pop_back();
+      if (seen.contains(cur))
+        continue;
+      seen.insert(cur);
+      for (auto &U : cur->uses()) {
+        auto I = cast<Instruction>(U.getUser());
+        if (isPointerArithmeticInst(I)) {
+          todo.push_back(I);
+          continue;
+        }
+        if (isa<LoadInst>(I)) {
+          read = true;
+          continue;
+        }
+        if (auto SI = dyn_cast<StoreInst>(I)) {
+          if (SI->getValueOperand() == cur) {
+            captured = true;
+            read = true;
+            written = true;
+            break;
+          }
+          if (SI->getPointerOperand() == cur) {
+            written = true;
+            continue;
+          }
+        }
+        if (auto MSI = dyn_cast<MemSetInst>(I)) {
+          if (MSI->getRawDest() == cur) {
+            written = true;
+          }
+          continue;
+        }
+        if (auto MTI = dyn_cast<MemTransferInst>(I)) {
+          if (MTI->getRawDest() == cur) {
+            written = true;
+          }
+          if (MTI->getRawSource() == cur) {
+            read = true;
+          }
+          continue;
+        }
+        if (auto CB = dyn_cast<CallBase>(I)) {
+
+          if (CB->getCalledOperand() == cur) {
+            captured = true;
+            read = true;
+            written = true;
+            break;
+          }
+
+          auto F2 = dyn_cast<Function>(CB->getCalledOperand());
+
+          if (F2 == &F && U.getOperandNo() == arg.getArgNo()) {
+            continue;
+          }
+
+          auto name = getFuncNameFromCall(CB);
+
+          if (name == "julia.write_barrier") {
+            continue;
+          }
+
+          // Used as operand bundle
+          if (U.getOperandNo() >= CB->arg_size()) {
+            captured = true;
+            read = true;
+            written = true;
+            break;
+          }
+
+          if (!isNoCapture(CB, U.getOperandNo()) && !arg.hasNoCaptureAttr()) {
+            captured = true;
+            if (F2)
+              calls_todo.insert(F2);
+          }
+
+          if (!isReadOnly(CB, U.getOperandNo()) &&
+              !Attrs.hasParamAttr(arg.getArgNo(), Attribute::ReadNone) &&
+              !Attrs.hasParamAttr(arg.getArgNo(), Attribute::ReadOnly)) {
+            written = true;
+            if (F2)
+              calls_todo.insert(F2);
+          }
+
+          if (!isWriteOnly(CB, U.getOperandNo()) &&
+              !Attrs.hasParamAttr(arg.getArgNo(), Attribute::ReadNone) &&
+              !Attrs.hasParamAttr(arg.getArgNo(), Attribute::WriteOnly)) {
+            read = true;
+            if (F2)
+              calls_todo.insert(F2);
+          }
+          continue;
+        }
+
+        captured = true;
+        read = true;
+        written = true;
+        break;
+      }
+    }
+
+    if (!captured && !arg.hasNoCaptureAttr()) {
+      addFunctionNoCapture(arg.getParent(), arg.getArgNo());
+      changed = true;
+    }
+
+    if ((!read && !written) ||
+        Attrs.hasParamAttr(arg.getArgNo(), Attribute::ReadNone)) {
+      if (!Attrs.hasParamAttr(arg.getArgNo(), Attribute::ReadNone)) {
+        if (Attrs.hasParamAttr(arg.getArgNo(), Attribute::ReadOnly)) {
+          arg.removeAttr(Attribute::ReadOnly);
+        }
+        if (Attrs.hasParamAttr(arg.getArgNo(), Attribute::WriteOnly)) {
+          arg.removeAttr(Attribute::WriteOnly);
+        }
+        arg.addAttr(Attribute::ReadNone);
+        changed = true;
+      }
+    } else if (!written) {
+      if (!Attrs.hasParamAttr(arg.getArgNo(), Attribute::ReadOnly)) {
+        arg.addAttr(Attribute::ReadOnly);
+        changed = true;
+      }
+    } else if (!read) {
+      if (!Attrs.hasParamAttr(arg.getArgNo(), Attribute::WriteOnly)) {
+        arg.addAttr(Attribute::WriteOnly);
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+// returns if newly changed, subject to the pending calls
+bool DetectNoUnwindOfFn(llvm::Function &F,
+                        SmallPtrSetImpl<Function *> &calls_todo) {
+  if (F.empty())
+    return false;
+  if (F.doesNotThrow())
+    return false;
+
+  bool mayThrow = false;
+
+  for (auto &BB : F) {
+    for (auto &I : BB) {
+#if LLVM_VERSION_MAJOR >= 17
+      if (!I.mayThrow(/*IncludePhaseOneUnwind*/ true)) {
+        continue;
+      }
+#else
+      if (!I.mayThrow()) {
+        continue;
+      }
+#endif
+      if (auto CB = dyn_cast<CallBase>(&I)) {
+        if (auto F2 = CB->getCalledFunction()) {
+          if (F2 == &F)
+            continue;
+          if (F2->doesNotThrow())
+            continue;
+          calls_todo.insert(F2);
+        }
+      }
+      mayThrow = true;
+      break;
+    }
+  }
+  if (mayThrow)
+    return false;
+  F.setDoesNotThrow();
+  return true;
+}
+
 // returns if newly legal, subject to the pending calls
 bool DetectReadonlyOrThrowFn(llvm::Function &F,
                              SmallPtrSetImpl<Function *> &calls_todo,
@@ -1685,6 +1879,70 @@ bool DetectReadonlyOrThrowFn(llvm::Function &F,
         continue;
       if (hasMetadata(&I, "enzyme_LocalReadOnlyOrThrow"))
         continue;
+
+      if (auto MTI = dyn_cast<MemTransferInst>(&I)) {
+        auto Obj = getBaseObject(MTI->getOperand(0));
+        // Storing into local memory is fine since it definitionally will not be
+        // seen outside the function. Note, even if one stored into x =
+        // malloc(..), and stored x into a global/arg pointer, that second store
+        // would trigger not readonly.
+        if (isa<AllocaInst>(Obj))
+          continue;
+        if (isAllocationCall(Obj, TLI)) {
+          if (local)
+            continue;
+          if (notCaptured(Obj))
+            continue;
+          local = true;
+          continue;
+        }
+        if (auto arg = dyn_cast<Argument>(Obj)) {
+          if (arg->hasStructRetAttr() ||
+              arg->getParent()
+                  ->getAttribute(arg->getArgNo() + AttributeList::FirstArgIndex,
+                                 "enzymejl_returnRoots")
+                  .isValid() ||
+              arg->getParent()
+                  ->getAttribute(arg->getArgNo() + AttributeList::FirstArgIndex,
+                                 "enzymejl_sret_union_bytes")
+                  .isValid()) {
+            local = true;
+            continue;
+          }
+        }
+      }
+      if (auto MSI = dyn_cast<MemSetInst>(&I)) {
+        auto Obj = getBaseObject(MSI->getOperand(0));
+        // Storing into local memory is fine since it definitionally will not be
+        // seen outside the function. Note, even if one stored into x =
+        // malloc(..), and stored x into a global/arg pointer, that second store
+        // would trigger not readonly.
+        if (isa<AllocaInst>(Obj))
+          continue;
+        if (isAllocationCall(Obj, TLI)) {
+          if (local)
+            continue;
+          if (notCaptured(Obj))
+            continue;
+          local = true;
+          continue;
+        }
+        if (auto arg = dyn_cast<Argument>(Obj)) {
+          if (arg->hasStructRetAttr() ||
+              arg->getParent()
+                  ->getAttribute(arg->getArgNo() + AttributeList::FirstArgIndex,
+                                 "enzymejl_returnRoots")
+                  .isValid() ||
+              arg->getParent()
+                  ->getAttribute(arg->getArgNo() + AttributeList::FirstArgIndex,
+                                 "enzymejl_sret_union_bytes")
+                  .isValid()) {
+            local = true;
+            continue;
+          }
+        }
+      }
+
       if (auto CI = dyn_cast<CallBase>(&I)) {
         if (isLocalReadOnlyOrThrow(CI)) {
           continue;
@@ -1692,8 +1950,43 @@ bool DetectReadonlyOrThrowFn(llvm::Function &F,
         if (isAllocationCall(CI, TLI)) {
           continue;
         }
+        if (getFuncNameFromCall(CI) == "zeroType") {
+          auto Obj = getBaseObject(CI->getArgOperand(0));
+          // Storing into local memory is fine since it definitionally will not
+          // be seen outside the function. Note, even if one stored into x =
+          // malloc(..), and stored x into a global/arg pointer, that second
+          // store would trigger not readonly.
+          if (isa<AllocaInst>(Obj))
+            continue;
+          if (isAllocationCall(Obj, TLI)) {
+            if (local)
+              continue;
+            if (notCaptured(Obj))
+              continue;
+            local = true;
+            continue;
+          }
+          if (auto arg = dyn_cast<Argument>(Obj)) {
+            if (arg->hasStructRetAttr() ||
+                arg->getParent()
+                    ->getAttribute(arg->getArgNo() +
+                                       AttributeList::FirstArgIndex,
+                                   "enzymejl_returnRoots")
+                    .isValid() ||
+                arg->getParent()
+                    ->getAttribute(arg->getArgNo() +
+                                       AttributeList::FirstArgIndex,
+                                   "enzymejl_sret_union_bytes")
+                    .isValid()) {
+              local = true;
+              continue;
+            }
+          }
+        }
         if (auto F2 = CI->getCalledFunction()) {
           if (isDebugFunction(F2))
+            continue;
+          if (F2->getName() == "julia.write_barrier")
             continue;
           if (F2->getCallingConv() == CI->getCallingConv()) {
             if (F2 == &F)
@@ -1735,60 +2028,10 @@ bool DetectReadonlyOrThrowFn(llvm::Function &F,
               arg->getParent()
                   ->getAttribute(arg->getArgNo() + AttributeList::FirstArgIndex,
                                  "enzymejl_returnRoots")
-                  .isValid()) {
-            local = true;
-            continue;
-          }
-        }
-      }
-      if (auto MTI = dyn_cast<MemTransferInst>(&I)) {
-        auto Obj = getBaseObject(MTI->getOperand(0));
-        // Storing into local memory is fine since it definitionally will not be
-        // seen outside the function. Note, even if one stored into x =
-        // malloc(..), and stored x into a global/arg pointer, that second store
-        // would trigger not readonly.
-        if (isa<AllocaInst>(Obj))
-          continue;
-        if (isAllocationCall(Obj, TLI)) {
-          if (local)
-            continue;
-          if (notCaptured(Obj))
-            continue;
-          local = true;
-          continue;
-        }
-        if (auto arg = dyn_cast<Argument>(Obj)) {
-          if (arg->hasStructRetAttr() ||
+                  .isValid() ||
               arg->getParent()
                   ->getAttribute(arg->getArgNo() + AttributeList::FirstArgIndex,
-                                 "enzymejl_returnRoots")
-                  .isValid()) {
-            local = true;
-            continue;
-          }
-        }
-      }
-      if (auto MSI = dyn_cast<MemSetInst>(&I)) {
-        auto Obj = getBaseObject(MSI->getOperand(0));
-        // Storing into local memory is fine since it definitionally will not be
-        // seen outside the function. Note, even if one stored into x =
-        // malloc(..), and stored x into a global/arg pointer, that second store
-        // would trigger not readonly.
-        if (isa<AllocaInst>(Obj))
-          continue;
-        if (isAllocationCall(Obj, TLI)) {
-          if (local)
-            continue;
-          if (notCaptured(Obj))
-            continue;
-          local = true;
-          continue;
-        }
-        if (auto arg = dyn_cast<Argument>(Obj)) {
-          if (arg->hasStructRetAttr() ||
-              arg->getParent()
-                  ->getAttribute(arg->getArgNo() + AttributeList::FirstArgIndex,
-                                 "enzymejl_returnRoots")
+                                 "enzymejl_sret_union_bytes")
                   .isValid()) {
             local = true;
             continue;
@@ -1831,6 +2074,98 @@ bool DetectReadonlyOrThrowFn(llvm::Function &F,
 bool DetectReadonlyOrThrow(Module &M) {
 
   bool changed = false;
+
+  {
+    // Set of functions newly deduced readonly/nocapture/etc by this pass
+    SmallVector<llvm::Function *> todo;
+
+    // Map of functions which could be readonly if all functions in the set are
+    // marked readonly
+    DenseMap<llvm::Function *, SmallPtrSet<Function *, 1>> todo_map;
+
+    for (Function &F : M) {
+      SmallPtrSet<Function *, 1> calls_todo;
+      if (DetectNoUnwindOfFn(F, calls_todo)) {
+        changed = true;
+        for (auto F2 : todo_map[&F]) {
+          todo.push_back(F2);
+        }
+        todo_map.erase(&F);
+      }
+      for (auto tocheck : calls_todo) {
+        todo_map[tocheck].insert(&F);
+        todo.push_back(tocheck);
+      }
+    }
+
+    while (!todo.empty()) {
+      auto cur = todo.pop_back_val();
+
+      SmallPtrSet<Function *, 1> calls_todo;
+
+      if (!DetectNoUnwindOfFn(*cur, calls_todo))
+        continue;
+
+      for (auto F2 : todo_map[cur]) {
+        todo.push_back(F2);
+      }
+
+      todo_map.erase(cur);
+
+      for (auto tocheck : calls_todo) {
+        todo_map[tocheck].insert(cur);
+        todo.push_back(tocheck);
+      }
+
+      changed = true;
+    }
+  }
+
+  {
+    // Set of functions newly deduced readonly/nocapture/etc by this pass
+    SmallVector<llvm::Function *> todo;
+
+    // Map of functions which could be readonly if all functions in the set are
+    // marked readonly
+    DenseMap<llvm::Function *, SmallPtrSet<Function *, 1>> todo_map;
+
+    for (Function &F : M) {
+      SmallPtrSet<Function *, 1> calls_todo;
+      if (DetectPointerArgOfFn(F, calls_todo)) {
+        changed = true;
+        for (auto F2 : todo_map[&F]) {
+          todo.push_back(F2);
+        }
+        todo_map.erase(&F);
+      }
+      for (auto tocheck : calls_todo) {
+        todo_map[tocheck].insert(&F);
+        todo.push_back(tocheck);
+      }
+    }
+
+    while (!todo.empty()) {
+      auto cur = todo.pop_back_val();
+
+      SmallPtrSet<Function *, 1> calls_todo;
+
+      if (!DetectPointerArgOfFn(*cur, calls_todo))
+        continue;
+
+      for (auto F2 : todo_map[cur]) {
+        todo.push_back(F2);
+      }
+
+      todo_map.erase(cur);
+
+      for (auto tocheck : calls_todo) {
+        todo_map[tocheck].insert(cur);
+        todo.push_back(tocheck);
+      }
+
+      changed = true;
+    }
+  }
 
   PassBuilder PB;
   LoopAnalysisManager LAM;
@@ -1979,7 +2314,7 @@ Function *PreProcessCache::preprocessForClone(Function *F,
             }
           }
 
-          if (called && called->getName() == "__enzyme_iter") {
+          if (called && called->getName().contains("__enzyme_iter")) {
             ItersToErase.push_back(CI);
           }
         }
@@ -2724,31 +3059,22 @@ Function *PreProcessCache::CloneFunctionWithReturns(
 
   for (auto i = F->arg_begin(), j = NewF->arg_begin(); i != F->arg_end();) {
     if (F->hasParamAttribute(ii, Attribute::StructRet)) {
-      NewF->addParamAttr(jj, Attribute::get(F->getContext(), "enzyme_sret"));
-      // TODO
-      // NewF->addParamAttr(
-      //    jj,
-      //    Attribute::get(
-      //        F->getContext(), Attribute::AttrKind::ElementType,
-      //        F->getParamAttribute(ii,
-      //        Attribute::StructRet).getValueAsType()));
-    }
-    if (F->getAttributes().hasParamAttr(ii, "enzymejl_returnRoots")) {
       NewF->addParamAttr(
-          jj, F->getAttributes().getParamAttr(ii, "enzymejl_returnRoots"));
-      // TODO
-      // NewF->addParamAttr(jj, F->getParamAttribute(ii,
-      // Attribute::ElementType));
+          jj, Attribute::get(F->getContext(), "enzyme_sret",
+                             convertSRetTypeToString(
+                                 F->getParamAttribute(ii, Attribute::StructRet)
+                                     .getValueAsType())));
     }
-    for (auto attr :
-         {"enzymejl_parmtype", "enzymejl_parmtype_ref", "enzyme_type"})
+    for (auto attr : {"enzymejl_parmtype", "enzymejl_parmtype_ref",
+                      "enzyme_type", "enzymejl_rooted_typ",
+                      "enzymejl_returnRoots", "enzymejl_sret_union_bytes"})
       if (F->getAttributes().hasParamAttr(ii, attr)) {
         NewF->addParamAttr(jj, F->getAttributes().getParamAttr(ii, attr));
-        for (auto ty : PrimalParamAttrsToPreserve)
-          if (F->getAttributes().hasParamAttr(ii, ty)) {
-            auto attr = F->getAttributes().getParamAttr(ii, ty);
-            NewF->addParamAttr(jj, attr);
-          }
+      }
+    for (auto ty : PrimalParamAttrsToPreserve)
+      if (F->getAttributes().hasParamAttr(ii, ty)) {
+        auto attr = F->getAttributes().getParamAttr(ii, ty);
+        NewF->addParamAttr(jj, attr);
       }
     if (constant_args[ii] == DIFFE_TYPE::CONSTANT) {
       if (!i->hasByValAttr())
@@ -2787,51 +3113,37 @@ Function *PreProcessCache::CloneFunctionWithReturns(
             NewF->addParamAttr(jj + 1, attr);
           }
 
-      for (auto attr :
-           {"enzymejl_parmtype", "enzymejl_parmtype_ref", "enzyme_type"})
+      for (auto attr : {"enzymejl_parmtype", "enzymejl_parmtype_ref",
+                        "enzyme_type", "enzymejl_rooted_typ",
+                        "enzymejl_returnRoots", "enzymejl_sret_union_bytes"})
         if (F->getAttributes().hasParamAttr(ii, attr)) {
           if (width == 1)
             NewF->addParamAttr(jj + 1,
                                F->getAttributes().getParamAttr(ii, attr));
+          else
+            NewF->addParamAttr(jj + 1,
+                               Attribute::get(F->getContext(),
+                                              attr + std::string("_v"),
+                                              F->getAttributes()
+                                                  .getParamAttr(ii, attr)
+                                                  .getValueAsString()));
         }
-
-      if (F->getAttributes().hasParamAttr(ii, "enzymejl_returnRoots")) {
-        if (width == 1) {
-          NewF->addParamAttr(jj + 1, F->getAttributes().getParamAttr(
-                                         ii, "enzymejl_returnRoots"));
-        } else {
-          NewF->addParamAttr(jj + 1, Attribute::get(F->getContext(),
-                                                    "enzymejl_returnRoots_v"));
-        }
-        // TODO
-        // NewF->addParamAttr(jj + 1,
-        //                   F->getParamAttribute(ii,
-        //                   Attribute::ElementType));
-      }
 
       if (F->hasParamAttribute(ii, Attribute::StructRet)) {
         if (width == 1) {
-          NewF->addParamAttr(jj + 1,
-                             Attribute::get(F->getContext(), "enzyme_sret"));
-          // TODO
-          // NewF->addParamAttr(
-          //     jj + 1,
-          //     Attribute::get(F->getContext(),
-          //     Attribute::AttrKind::ElementType,
-          //                    F->getParamAttribute(ii,
-          //                    Attribute::StructRet)
-          //                        .getValueAsType()));
+          NewF->addParamAttr(
+              jj + 1,
+              Attribute::get(F->getContext(), "enzyme_sret",
+                             convertSRetTypeToString(
+                                 F->getParamAttribute(ii, Attribute::StructRet)
+                                     .getValueAsType())));
         } else {
-          NewF->addParamAttr(jj + 1,
-                             Attribute::get(F->getContext(), "enzyme_sret_v"));
-          // TODO
-          // NewF->addParamAttr(
-          //     jj + 1,
-          //     Attribute::get(F->getContext(),
-          //     Attribute::AttrKind::ElementType,
-          //                    F->getParamAttribute(ii,
-          //                    Attribute::StructRet)
-          //                        .getValueAsType()));
+          NewF->addParamAttr(
+              jj + 1,
+              Attribute::get(F->getContext(), "enzyme_sret_v",
+                             convertSRetTypeToString(
+                                 F->getParamAttribute(ii, Attribute::StructRet)
+                                     .getValueAsType())));
         }
       }
 
@@ -4630,7 +4942,8 @@ std::optional<std::string> fixSparse_inner(Instruction *cur, llvm::Function &F,
           if (CI->isZero()) {
             // a + a ?= 0 -> a ?= 0
             if (auto addI = dyn_cast<Instruction>(fcmp->getOperand(1 - i))) {
-              if (addI->getOperand(0) == addI->getOperand(1)) {
+              if (addI->getOpcode() == Instruction::Add &&
+                  addI->getOperand(0) == addI->getOperand(1)) {
                 Value *res = pushcse(
                     B.CreateCmp(fcmp->getPredicate(), addI->getOperand(0), CI));
                 replaceAndErase(cur, res);
@@ -6070,7 +6383,11 @@ std::optional<std::string> fixSparse_inner(Instruction *cur, llvm::Function &F,
 
         Value *newIV = nullptr;
         {
+#if LLVM_VERSION_MAJOR >= 22
+          SCEVExpander Exp(SE, "sparseenzyme");
+#else
           SCEVExpander Exp(SE, DL, "sparseenzyme");
+#endif
           // We place that at first non phi as it may produce a non-phi
           // instruction and must thus be expanded after all phi's
           newIV = Exp.expandCodeFor(S, tmp->getType(), point);
@@ -8029,7 +8346,11 @@ void fixSparseIndices(llvm::Function &F, llvm::FunctionAnalysisManager &FAM,
 
       IRBuilder<> B(L->getHeader()->getFirstNonPHI());
       {
+#if LLVM_VERSION_MAJOR >= 22
+        SCEVExpander Exp(SE, "sparseenzyme");
+#else
         SCEVExpander Exp(SE, DL, "sparseenzyme");
+#endif
         auto LoopCountS = SE.getBackedgeTakenCount(L);
         LoopCount = B.CreateAdd(
             ConstantInt::get(idx->getType(), 1),
@@ -8190,7 +8511,11 @@ void fixSparseIndices(llvm::Function &F, llvm::FunctionAnalysisManager &FAM,
       auto off = en.index();
       auto &solutions = en.value().second;
       ConstraintContext ctx(SE, L, Assumptions, DT);
+#if LLVM_VERSION_MAJOR >= 22
+      SCEVExpander Exp(SE, "sparseenzyme", /*preservelcssa*/ false);
+#else
       SCEVExpander Exp(SE, DL, "sparseenzyme", /*preservelcssa*/ false);
+#endif
       auto sols = solutions->allSolutions(Exp, idxty, phterm, ctx, B);
       SmallVector<Value *, 1> prevSols;
       for (auto [sol, condition] : sols) {
@@ -8315,8 +8640,7 @@ void replaceToDense(llvm::CallBase *CI, bool replaceAll, llvm::Function *F,
       if (PT->getAddressSpace() != 0) {
 #if LLVM_VERSION_MAJOR < 17
         if (CI->getContext().supportsTypedPointers()) {
-          V = B.CreateAddrSpaceCast(
-              V, PointerType::getUnqual(PT->getPointerElementType()));
+          V = B.CreateAddrSpaceCast(V, getUnqual(PT->getPointerElementType()));
         } else {
           V = B.CreateAddrSpaceCast(V,
                                     PointerType::getUnqual(PT->getContext()));

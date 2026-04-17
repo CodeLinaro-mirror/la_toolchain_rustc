@@ -186,87 +186,129 @@ bool attributeKnownFunctions(llvm::Function &F) {
     F.addFnAttr(Attribute::NoFree);
   }
   if (F.getName() == "MPI_Irecv" || F.getName() == "PMPI_Irecv") {
+    auto FT = F.getFunctionType();
+    bool PointerABI = true;
     changed = true;
-#if LLVM_VERSION_MAJOR >= 16
-    F.setOnlyAccessesInaccessibleMemOrArgMem();
-#else
-    F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
-#endif
     F.addFnAttr(Attribute::NoUnwind);
     F.addFnAttr(Attribute::NoRecurse);
     F.addFnAttr(Attribute::WillReturn);
     F.addFnAttr(Attribute::NoFree);
     F.addFnAttr(Attribute::NoSync);
-    F.addParamAttr(0, Attribute::WriteOnly);
-    if (F.getFunctionType()->getParamType(2)->isPointerTy()) {
+    if (FT->getParamType(0)->isPointerTy()) {
+      F.addParamAttr(0, Attribute::WriteOnly);
+    } else {
+      PointerABI = false;
+    }
+    // OpenMPI vs MPICH
+    if (FT->getParamType(2)->isPointerTy()) {
       addFunctionNoCapture(&F, 2);
       F.addParamAttr(2, Attribute::WriteOnly);
     }
-    F.addParamAttr(6, Attribute::WriteOnly);
-  }
-  if (F.getName() == "MPI_Isend" || F.getName() == "PMPI_Isend") {
-    changed = true;
+    if (FT->getParamType(6)->isPointerTy()) {
+      F.addParamAttr(6, Attribute::WriteOnly);
+    } else {
+      PointerABI = false;
+    }
+    if (PointerABI) {
 #if LLVM_VERSION_MAJOR >= 16
-    F.setOnlyAccessesInaccessibleMemOrArgMem();
+      F.setOnlyAccessesInaccessibleMemOrArgMem();
 #else
-    F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
+      F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
 #endif
+    }
+  }
+  auto name = getFuncName(&F);
+  if (name == "MPI_Isend" || name == "PMPI_Isend") {
+    auto FT = F.getFunctionType();
+    bool PointerABI = true;
+    changed = true;
     F.addFnAttr(Attribute::NoUnwind);
     F.addFnAttr(Attribute::NoRecurse);
     F.addFnAttr(Attribute::WillReturn);
     F.addFnAttr(Attribute::NoFree);
     F.addFnAttr(Attribute::NoSync);
-    F.addParamAttr(0, Attribute::ReadOnly);
-    if (F.getFunctionType()->getParamType(2)->isPointerTy()) {
+    if (FT->getParamType(0)->isPointerTy()) {
+      F.addParamAttr(0, Attribute::ReadOnly);
+    } else {
+      PointerABI = false;
+    }
+    // OpenMPI vs MPICH
+    if (FT->getParamType(2)->isPointerTy()) {
       addFunctionNoCapture(&F, 2);
       F.addParamAttr(2, Attribute::ReadOnly);
     }
-    F.addParamAttr(6, Attribute::WriteOnly);
-  }
-  if (F.getName() == "MPI_Comm_rank" || F.getName() == "PMPI_Comm_rank" ||
-      F.getName() == "MPI_Comm_size" || F.getName() == "PMPI_Comm_size") {
-    changed = true;
+    if (FT->getParamType(6)->isPointerTy()) {
+      F.addParamAttr(6, Attribute::WriteOnly);
+    } else {
+      PointerABI = false;
+    }
+    if (PointerABI) {
 #if LLVM_VERSION_MAJOR >= 16
-    F.setOnlyAccessesInaccessibleMemOrArgMem();
+      F.setOnlyAccessesInaccessibleMemOrArgMem();
 #else
-    F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
+      F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
 #endif
+    }
+  }
+  if (name == "MPI_Comm_rank" || name == "PMPI_Comm_rank" ||
+      name == "MPI_Comm_size" || name == "PMPI_Comm_size") {
+    auto FT = F.getFunctionType();
+    bool PointerABI = true;
+    changed = true;
     F.addFnAttr(Attribute::NoUnwind);
     F.addFnAttr(Attribute::NoRecurse);
     F.addFnAttr(Attribute::WillReturn);
     F.addFnAttr(Attribute::NoFree);
     F.addFnAttr(Attribute::NoSync);
 
-    if (F.getFunctionType()->getParamType(0)->isPointerTy()) {
+    // OpenMPI vs MPICH
+    if (FT->getParamType(0)->isPointerTy()) {
       addFunctionNoCapture(&F, 0);
       F.addParamAttr(0, Attribute::ReadOnly);
+    }
+    if (FT->getParamType(1)->isPointerTy()) {
+      F.addParamAttr(1, Attribute::WriteOnly);
+      addFunctionNoCapture(&F, 1);
+    } else {
+      PointerABI = false;
+    }
+    if (PointerABI) {
+#if LLVM_VERSION_MAJOR >= 16
+      F.setOnlyAccessesInaccessibleMemOrArgMem();
+#else
+      F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
+#endif
+    }
+  }
+  if (name == "MPI_Wait" || name == "PMPI_Wait") {
+    changed = true;
+    F.addFnAttr(Attribute::NoUnwind);
+    F.addFnAttr(Attribute::NoRecurse);
+    F.addFnAttr(Attribute::WillReturn);
+    F.addFnAttr(Attribute::NoFree);
+    F.addFnAttr(Attribute::NoSync);
+    if (F.getFunctionType()->getParamType(0)->isPointerTy()) {
+      addFunctionNoCapture(&F, 0);
     }
     if (F.getFunctionType()->getParamType(1)->isPointerTy()) {
       F.addParamAttr(1, Attribute::WriteOnly);
       addFunctionNoCapture(&F, 1);
     }
   }
-  if (F.getName() == "MPI_Wait" || F.getName() == "PMPI_Wait") {
+  if (name == "MPI_Waitall" || name == "PMPI_Waitall") {
     changed = true;
     F.addFnAttr(Attribute::NoUnwind);
     F.addFnAttr(Attribute::NoRecurse);
     F.addFnAttr(Attribute::WillReturn);
     F.addFnAttr(Attribute::NoFree);
     F.addFnAttr(Attribute::NoSync);
-    addFunctionNoCapture(&F, 0);
-    F.addParamAttr(1, Attribute::WriteOnly);
-    addFunctionNoCapture(&F, 1);
-  }
-  if (F.getName() == "MPI_Waitall" || F.getName() == "PMPI_Waitall") {
-    changed = true;
-    F.addFnAttr(Attribute::NoUnwind);
-    F.addFnAttr(Attribute::NoRecurse);
-    F.addFnAttr(Attribute::WillReturn);
-    F.addFnAttr(Attribute::NoFree);
-    F.addFnAttr(Attribute::NoSync);
-    addFunctionNoCapture(&F, 1);
-    F.addParamAttr(2, Attribute::WriteOnly);
-    addFunctionNoCapture(&F, 2);
+    if (F.getFunctionType()->getParamType(1)->isPointerTy()) {
+      addFunctionNoCapture(&F, 1);
+    }
+    if (F.getFunctionType()->getParamType(2)->isPointerTy()) {
+      F.addParamAttr(2, Attribute::WriteOnly);
+      addFunctionNoCapture(&F, 2);
+    }
   }
   // Map of MPI function name to the arg index of its type argument
   std::map<std::string, int> MPI_TYPE_ARGS = {
@@ -282,7 +324,7 @@ bool attributeKnownFunctions(llvm::Function &F) {
 
       {"MPI_Allreduce", 3}, {"PMPI_Allreduce", 3}};
   {
-    auto found = MPI_TYPE_ARGS.find(F.getName().str());
+    auto found = MPI_TYPE_ARGS.find(name.str());
     if (found != MPI_TYPE_ARGS.end()) {
       for (auto user : F.users()) {
         if (auto CI = dyn_cast<CallBase>(user))
@@ -337,7 +379,6 @@ bool attributeKnownFunctions(llvm::Function &F) {
     F.addFnAttr(Attribute::ReadNone);
 #endif
   }
-  auto name = F.getName();
 
   const char *NonEscapingFns[] = {
       "julia.ptls_states",
@@ -595,8 +636,7 @@ static bool ReplaceOriginalCall(IRBuilder<> &Builder, Value *ret,
 
     if (DL.getTypeSizeInBits(retType) >= DL.getTypeSizeInBits(diffretType)) {
       Builder.CreateStore(
-          diffret,
-          Builder.CreatePointerCast(ret, PointerType::getUnqual(diffretType)));
+          diffret, Builder.CreatePointerCast(ret, getUnqual(diffretType)));
       CI->eraseFromParent();
       return true;
     }
@@ -609,8 +649,8 @@ static bool ReplaceOriginalCall(IRBuilder<> &Builder, Value *ret,
        DL.getTypeSizeInBits(retType) == DL.getTypeSizeInBits(diffretType))) {
     IRBuilder<> EB(CI->getFunction()->getEntryBlock().getFirstNonPHI());
     auto AL = EB.CreateAlloca(retType);
-    Builder.CreateStore(diffret, Builder.CreatePointerCast(
-                                     AL, PointerType::getUnqual(diffretType)));
+    Builder.CreateStore(diffret,
+                        Builder.CreatePointerCast(AL, getUnqual(diffretType)));
     Value *cload = Builder.CreateLoad(retType, AL);
     CI->replaceAllUsesWith(cload);
     CI->eraseFromParent();
@@ -1189,9 +1229,8 @@ public:
                                        ->getEntryBlock()
                                        .front());
                     auto AI = B.CreateAlloca(ST1);
-                    Builder.CreateStore(differet,
-                                        Builder.CreatePointerCast(
-                                            AI, PointerType::getUnqual(ST0)));
+                    Builder.CreateStore(differet, Builder.CreatePointerCast(
+                                                      AI, getUnqual(ST0)));
                     differet = Builder.CreateLoad(ST1, AI);
                   }
 
@@ -1710,7 +1749,7 @@ public:
     bool AtomicAdd = Arch == Triple::nvptx || Arch == Triple::nvptx64 ||
                      Arch == Triple::amdgcn;
 
-    TypeAnalysis TA(Logic.PPC.FAM);
+    TypeAnalysis TA(Logic);
     FnTypeInfo type_args = populate_type_args(TA, fn, mode);
 
     IRBuilder Builder(CI);
@@ -1938,8 +1977,7 @@ public:
         auto AL = EB.CreateAlloca(tape->getType());
         Builder.CreateStore(tape, AL);
         tape = Builder.CreateLoad(
-            tapeType,
-            Builder.CreatePointerCast(AL, PointerType::getUnqual(tapeType)));
+            tapeType, Builder.CreatePointerCast(AL, getUnqual(tapeType)));
       }
       assert(tape->getType() == tapeType);
       args.push_back(tape);
@@ -2813,7 +2851,7 @@ public:
       }
       auto FT = FunctionType::get(CI->getType(), ArgTypes, /*varargs*/ false);
       if (fn->getType() != FT) {
-        fn = B.CreatePointerCast(fn, PointerType::getUnqual(FT));
+        fn = B.CreatePointerCast(fn, getUnqual(FT));
       }
       auto Rep = B.CreateCall(FT, fn, Args);
       Rep->addAttribute(AttributeList::FunctionIndex,
@@ -2850,7 +2888,7 @@ public:
                     *CI->getArgOperand(0));
         return false;
       }
-      TypeAnalysis TA(Logic.PPC.FAM);
+      TypeAnalysis TA(Logic);
 
       auto Arch =
           llvm::Triple(
@@ -3092,7 +3130,7 @@ public:
                 CI->eraseFromParent();
                 changed = true;
               }
-              if (F->getName() == "__enzyme_iter" ||
+              if (F->getName().contains("__enzyme_iter") ||
                   F->getName().contains("__enzyme_ignore_derivatives")) {
                 CI->replaceAllUsesWith(CI->getArgOperand(0));
                 CI->eraseFromParent();
@@ -3313,7 +3351,11 @@ extern "C" void AddEnzymePass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createEnzymePass(/*PostOpt*/ false));
 }
 
+#if LLVM_VERSION_MAJOR >= 22
+#include "llvm/Plugins/PassPlugin.h"
+#else
 #include "llvm/Passes/PassPlugin.h"
+#endif
 
 class EnzymeNewPM final : public EnzymeBase,
                           public AnalysisInfoMixin<EnzymeNewPM> {
@@ -3340,6 +3382,7 @@ AnalysisKey EnzymeNewPM::Key;
 #include "ActivityAnalysisPrinter.h"
 #include "JLInstSimplify.h"
 #include "PreserveNVVM.h"
+#include "SimpleGVN.h"
 #include "TypeAnalysis/TypeAnalysisPrinter.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h"
@@ -3690,10 +3733,17 @@ void augmentPassBuilder(llvm::PassBuilder &PB) {
         createModuleToFunctionPassAdaptor(InvalidateAnalysisPass<AAManager>()));
 
     FunctionPassManager MainFPM;
+#if LLVM_VERSION_MAJOR >= 22
+    MainFPM.addPass(createFunctionToLoopPassAdaptor(
+        LICMPass(SetLicmMssaOptCap, SetLicmMssaNoAccForPromotionCap,
+                 /*AllowSpeculation=*/true),
+        /*USeMemorySSA=*/true));
+#else
     MainFPM.addPass(createFunctionToLoopPassAdaptor(
         LICMPass(SetLicmMssaOptCap, SetLicmMssaNoAccForPromotionCap,
                  /*AllowSpeculation=*/true),
         /*USeMemorySSA=*/true, /*UseBlockFrequencyInfo=*/false));
+#endif
 
     if (RunNewGVN)
       MainFPM.addPass(NewGVNPass());
@@ -3750,17 +3800,21 @@ extern "C" void registerEnzymeAndPassPipeline(llvm::PassBuilder &PB,
           MPM.addPass(TypeAnalysisPrinterNewPM());
           return true;
         }
+        if (Name == "print-activity-analysis") {
+          MPM.addPass(ActivityAnalysisPrinterNewPM());
+          return true;
+        }
         return false;
       });
   PB.registerPipelineParsingCallback(
       [](llvm::StringRef Name, llvm::FunctionPassManager &FPM,
          llvm::ArrayRef<llvm::PassBuilder::PipelineElement>) {
-        if (Name == "print-activity-analysis") {
-          FPM.addPass(ActivityAnalysisPrinterNewPM());
-          return true;
-        }
         if (Name == "jl-inst-simplify") {
           FPM.addPass(JLInstSimplifyNewPM());
+          return true;
+        }
+        if (Name == "simple-gvn") {
+          FPM.addPass(SimpleGVNNewPM());
           return true;
         }
         return false;
