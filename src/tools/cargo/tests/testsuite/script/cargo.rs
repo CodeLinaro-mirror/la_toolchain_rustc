@@ -39,7 +39,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] echo v0.0.0 ([ROOT]/foo/echo.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/echo[EXE]`
@@ -64,7 +64,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] echo v0.0.0 ([ROOT]/foo/echo.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/echo[EXE]`
@@ -89,7 +89,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] echo v0.0.0 ([ROOT]/foo/echo.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/echo[EXE]`
@@ -113,7 +113,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] echo v0.0.0 ([ROOT]/foo/echo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/echo[EXE]`
@@ -168,7 +168,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] echo v0.0.0 ([ROOT]/foo/echo.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/echo[EXE]`
@@ -321,7 +321,7 @@ Hello world!
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
@@ -349,7 +349,7 @@ msg = undefined
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
@@ -365,7 +365,7 @@ msg = undefined
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
 
@@ -381,7 +381,7 @@ msg = hello
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
@@ -414,6 +414,7 @@ rustc = "non-existent-rustc"
         .masquerade_as_nightly_cargo(&["script"])
         .with_status(101)
         .with_stderr_data(str![[r#"
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `2024`)
 [ERROR] could not execute process `non-existent-rustc -vV` (never executed)
 
 Caused by:
@@ -449,7 +450,10 @@ arg0: [..]
 args: ["-NotAnArg"]
 
 "#]])
-        .with_stderr_data("")
+        .with_stderr_data(str![[r#"
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
+
+"#]])
         .run();
 }
 
@@ -468,7 +472,10 @@ arg0: [..]
 args: ["-NotAnArg"]
 
 "#]])
-        .with_stderr_data("")
+        .with_stderr_data(str![[r#"
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
+
+"#]])
         .run();
 }
 
@@ -491,7 +498,7 @@ line: 4
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
@@ -516,7 +523,7 @@ args: ["-NotAnArg"]
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE] -NotAnArg`
@@ -541,7 +548,7 @@ args: ["-NotAnArg"]
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE] -NotAnArg`
@@ -566,7 +573,7 @@ args: ["--help"]
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE] --help`
@@ -591,7 +598,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] s-h-w-c- v0.0.0 ([ROOT]/foo/s-h.w§c!.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/s-h-w-c-[EXE]`
@@ -616,7 +623,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] answer v0.0.0 ([ROOT]/foo/42answer.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/answer[EXE]`
@@ -639,7 +646,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] package v0.0.0 ([ROOT]/foo/42.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/package[EXE]`
@@ -663,7 +670,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] con v0.0.0 ([ROOT]/foo/con)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/con[EXE]`
@@ -686,7 +693,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] test v0.0.0 ([ROOT]/foo/test)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/test[EXE]`
@@ -709,7 +716,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] self v0.0.0 ([ROOT]/foo/self)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/self[EXE]`
@@ -730,7 +737,7 @@ fn test_name_is_deps_dir_implicit() {
         .with_status(101)
         .with_stdout_data(str![""])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [ERROR] failed to parse manifest at `[ROOT]/foo/deps.rs`
 
 Caused by:
@@ -769,7 +776,7 @@ fn test () {}
         .with_status(101)
         .with_stdout_data(str![""])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [ERROR] failed to parse manifest at `[ROOT]/foo/deps.rs`
 
 Caused by:
@@ -915,7 +922,7 @@ Hello world!
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest Rust [..] compatible version
 [DOWNLOADING] crates ...
@@ -954,7 +961,7 @@ Hello world!
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [LOCKING] 1 package to latest Rust [..] compatible version
 [COMPILING] bar v0.0.1 ([ROOT]/foo/bar)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
@@ -984,7 +991,7 @@ Hello world!
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE] --help`
@@ -1012,7 +1019,7 @@ Hello world!
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE] --help`
@@ -1040,7 +1047,7 @@ Hello world!
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE] --help`
@@ -1568,7 +1575,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
@@ -1596,7 +1603,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
@@ -1653,7 +1660,7 @@ fn cmd_check_with_embedded() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [CHECKING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1702,7 +1709,7 @@ fn cmd_build_with_embedded() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1729,7 +1736,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] unittests script.rs ([ROOT]/home/.cargo/build/[HASH]/debug/deps/script-[HASH][EXE])
@@ -1754,7 +1761,7 @@ fn cmd_clean_with_embedded() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
 
 "#]])
@@ -1772,7 +1779,7 @@ fn cmd_generate_lockfile_with_embedded() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 
 "#]])
         .run();
@@ -1860,7 +1867,7 @@ fn cmd_metadata_with_embedded() {
             .is_json(),
         )
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 
 "#]])
         .run();
@@ -1922,7 +1929,7 @@ fn cmd_read_manifest_with_embedded() {
             .is_json(),
         )
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 
 "#]])
         .run();
@@ -1943,7 +1950,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
@@ -1965,7 +1972,7 @@ script v0.0.0 ([ROOT]/foo/script.rs)
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 
 "#]])
         .run();
@@ -1981,7 +1988,7 @@ fn cmd_update_with_embedded() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 
 "#]])
         .run();
@@ -2004,7 +2011,7 @@ fn cmd_verify_project_with_embedded() {
             .is_json(),
         )
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 
 "#]])
         .run();
@@ -2027,7 +2034,7 @@ path+[ROOTURL]/foo/script.rs#script@0.0.0
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 
 "#]])
         .run();
@@ -2043,7 +2050,7 @@ fn cmd_pkgid_with_embedded_no_lock_file() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_status(101)
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [ERROR] a Cargo.lock must exist for this command
 
 "#]])
@@ -2077,7 +2084,7 @@ registry+https://github.com/rust-lang/crates.io-index#dep@1.0.0
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 
 "#]])
         .run();
@@ -2105,7 +2112,7 @@ script.path = "script.rs"
         .masquerade_as_nightly_cargo(&["script"])
         .with_status(101)
         .with_stderr_data(str![[r#"
-[WARNING] no edition set: defaulting to the 2015 edition while the latest is 2024
+[WARNING] `package.edition` is unspecified, defaulting to `2015` while the latest is `[..]`
 [ERROR] failed to get `script` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
 
 Caused by:
@@ -2147,7 +2154,7 @@ fn cmd_package_with_embedded() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_status(101)
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [ERROR] [ROOT]/foo/script.rs is unsupported by `cargo package`
 
 "#]])
@@ -2164,7 +2171,7 @@ fn cmd_publish_with_embedded() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_status(101)
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [ERROR] [ROOT]/foo/script.rs is unsupported by `cargo publish`
 
 "#]])
@@ -2192,7 +2199,7 @@ CARGO_MANIFEST_PATH: [ROOT]/foo/script.rs
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/script[EXE]`
@@ -2244,7 +2251,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] echo v0.0.0 ([ROOT]/foo/script/echo.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/echo[EXE]`
@@ -2282,7 +2289,7 @@ args: []
 
 "#]])
         .with_stderr_data(str![[r#"
-[WARNING] `package.edition` is unspecified, defaulting to `2024`
+[WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [COMPILING] package v0.0.0 (/proc/self/fd/[..])
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/package`

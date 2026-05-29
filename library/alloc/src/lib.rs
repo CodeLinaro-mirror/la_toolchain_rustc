@@ -63,7 +63,7 @@
 #![doc(
     html_playground_url = "https://play.rust-lang.org/",
     issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/",
-    test(no_crate_inject, attr(allow(unused_variables), deny(warnings)))
+    test(no_crate_inject, attr(allow(unused_variables, duplicate_features), deny(warnings)))
 )]
 #![doc(auto_cfg(hide(no_global_oom_handling, no_rc, no_sync, target_has_atomic = "ptr")))]
 #![doc(rust_logo)]
@@ -89,11 +89,11 @@
 #![feature(allocator_api)]
 #![feature(array_into_iter_constructors)]
 #![feature(ascii_char)]
-#![feature(assert_matches)]
 #![feature(async_fn_traits)]
 #![feature(async_iterator)]
 #![feature(bstr)]
 #![feature(bstr_internals)]
+#![feature(case_ignorable)]
 #![feature(cast_maybe_uninit)]
 #![feature(cell_get_cloned)]
 #![feature(char_internals)]
@@ -112,6 +112,7 @@
 #![feature(core_intrinsics)]
 #![feature(deprecated_suggestion)]
 #![feature(deref_pure_trait)]
+#![feature(diagnostic_on_move)]
 #![feature(dispatch_from_dyn)]
 #![feature(ergonomic_clones)]
 #![feature(error_generic_member_access)]
@@ -149,6 +150,7 @@
 #![feature(slice_range)]
 #![feature(std_internals)]
 #![feature(temporary_niche_types)]
+#![feature(titlecase)]
 #![feature(transmutability)]
 #![feature(trivial_clone)]
 #![feature(trusted_fused)]

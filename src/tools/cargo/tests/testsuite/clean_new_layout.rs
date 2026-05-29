@@ -401,7 +401,7 @@ fn build_script() {
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..] build.rs [..]`
-[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build-script-build`
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
 [RUNNING] `rustc [..] src/main.rs [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -702,8 +702,11 @@ fn assert_all_clean(build_dir: &Path) {
     }) {
         let entry = entry.unwrap();
         let path = entry.path();
-        if let ".rustc_info.json" | ".cargo-lock" | "CACHEDIR.TAG" =
-            path.file_name().unwrap().to_str().unwrap()
+        if let ".rustc_info.json"
+        | ".cargo-lock"
+        | ".cargo-build-lock"
+        | ".cargo-artifact-lock"
+        | "CACHEDIR.TAG" = path.file_name().unwrap().to_str().unwrap()
         {
             continue;
         }

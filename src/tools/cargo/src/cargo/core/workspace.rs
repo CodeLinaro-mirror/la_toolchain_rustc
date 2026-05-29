@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use annotate_snippets::Level;
 use anyhow::{Context as _, anyhow, bail};
+use cargo_util_terminal::report::Level;
 use glob::glob;
 use itertools::Itertools;
 use tracing::debug;
@@ -34,6 +34,7 @@ use crate::lints::rules::non_snake_case_features;
 use crate::lints::rules::non_snake_case_packages;
 use crate::lints::rules::redundant_homepage;
 use crate::lints::rules::redundant_readme;
+use crate::lints::rules::unused_build_dependencies_no_build_rs;
 use crate::lints::rules::unused_workspace_dependencies;
 use crate::lints::rules::unused_workspace_package_fields;
 use crate::ops;
@@ -1389,6 +1390,13 @@ impl<'gctx> Workspace<'gctx> {
             )?;
             non_kebab_case_features(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
             non_snake_case_features(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
+            unused_build_dependencies_no_build_rs(
+                pkg,
+                &path,
+                &cargo_lints,
+                &mut run_error_count,
+                self.gctx,
+            )?;
             redundant_readme(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
             redundant_homepage(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
             missing_lints_inheritance(
@@ -2406,7 +2414,19 @@ fn find_workspace_root_with_loader(
 
     for ances_manifest_path in find_root_iter(manifest_path, gctx) {
         debug!("find_root - trying {}", ances_manifest_path.display());
-        if let Some(ws_root_path) = loader(&ances_manifest_path)? {
+        let ws_root_path = loader(&ances_manifest_path).with_context(|| {
+            format!(
+                "failed searching for potential workspace\n\
+                 package manifest: `{}`\n\
+                 invalid potential workspace manifest: `{}`\n\
+                 \n\
+                 help: to avoid searching for a non-existent workspace, add \
+                 `[workspace]` to the package manifest",
+                manifest_path.display(),
+                ances_manifest_path.display(),
+            )
+        })?;
+        if let Some(ws_root_path) = ws_root_path {
             return Ok(Some(ws_root_path));
         }
     }

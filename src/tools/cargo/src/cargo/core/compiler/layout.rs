@@ -220,6 +220,7 @@ use std::path::{Path, PathBuf};
 pub struct Layout {
     artifact_dir: Option<ArtifactDirLayout>,
     build_dir: BuildDirLayout,
+    _lock: Option<FileLock>,
 }
 
 impl Layout {
@@ -258,25 +259,19 @@ impl Layout {
         // actual destination (sub)subdirectory.
         paths::create_dir_all(dest.as_path_unlocked())?;
 
-        // We always need to take the build-dir lock but if the build-dir == artifact-dir then we
-        // only take the artifact-dir. (locking both as they are the same dir)
-        // However we need to take into account that for some builds like `cargo check` we avoid
-        // locking the artifact-dir. We still need to lock the build-dir to avoid file corruption.
-        let build_dir_lock = if (must_take_artifact_dir_lock && root == build_root)
-            || is_on_nfs_mount(build_root.as_path_unlocked())
-        {
+        let build_dir_lock = if is_on_nfs_mount(build_root.as_path_unlocked()) {
             None
         } else {
             if ws.gctx().cli_unstable().fine_grain_locking && !must_take_build_dir_lock_exclusively
             {
                 Some(build_dest.open_ro_shared_create(
-                    ".cargo-lock",
+                    ".cargo-build-lock",
                     ws.gctx(),
                     "build directory",
                 )?)
             } else {
                 Some(build_dest.open_rw_exclusive_create(
-                    ".cargo-lock",
+                    ".cargo-build-lock",
                     ws.gctx(),
                     "build directory",
                 )?)
@@ -287,6 +282,15 @@ impl Layout {
         let deps = build_dest.join("deps");
         let artifact = deps.join("artifact");
 
+        // We take a shared lock on `.cargo-lock` to make sure we don't run currently with
+        // older versions of Cargo (including tools that use Cargo as a library) that don't support
+        // `.cargo-build-lock`.
+        let lock = if is_on_nfs_mount(root.as_path_unlocked()) {
+            None
+        } else {
+            Some(dest.open_ro_shared_create(".cargo-lock", ws.gctx(), "artifact directory")?)
+        };
+
         let artifact_dir = if must_take_artifact_dir_lock {
             // For now we don't do any more finer-grained locking on the artifact
             // directory, so just lock the entire thing for the duration of this
@@ -295,7 +299,7 @@ impl Layout {
                 None
             } else {
                 Some(dest.open_rw_exclusive_create(
-                    ".cargo-lock",
+                    ".cargo-artifact-lock",
                     ws.gctx(),
                     "artifact directory",
                 )?)
@@ -326,6 +330,7 @@ impl Layout {
                 _lock: build_dir_lock,
                 is_new_layout,
             },
+            _lock: lock,
         })
     }
 

@@ -87,6 +87,7 @@ enum class ErrorType {
   GetIndexError = 9,
   NoTruncate = 10,
   GCRewrite = 11,
+  NaNError = 12,
 };
 
 extern "C" {
@@ -1168,21 +1169,22 @@ enum class MPI_Elem {
   Old = 7
 };
 
-static inline llvm::PointerType *getInt8PtrTy(llvm::LLVMContext &Context,
-                                              unsigned AddressSpace = 0) {
-#if LLVM_VERSION_MAJOR >= 21
-  return llvm::PointerType::get(Context, AddressSpace);
+static inline llvm::PointerType *getPointerType(llvm::Type *T,
+                                                unsigned AddressSpace = 0) {
+#if LLVM_VERSION_MAJOR >= 17
+  return llvm::PointerType::get(T->getContext(), AddressSpace);
 #else
-  return llvm::PointerType::get(llvm::Type::getInt8Ty(Context), AddressSpace);
+  return llvm::PointerType::get(T, AddressSpace);
 #endif
 }
 
+static inline llvm::PointerType *getInt8PtrTy(llvm::LLVMContext &Context,
+                                              unsigned AddressSpace = 0) {
+  return getPointerType(llvm::Type::getInt8Ty(Context), AddressSpace);
+}
+
 static inline llvm::PointerType *getUnqual(llvm::Type *T) {
-#if LLVM_VERSION_MAJOR >= 17
-  return llvm::PointerType::getUnqual(T->getContext());
-#else
-  return llvm::PointerType::getUnqual(T);
-#endif
+  return getPointerType(T);
 }
 
 static inline llvm::StructType *getMPIHelper(llvm::LLVMContext &Context) {
@@ -2404,10 +2406,6 @@ llvm::Optional<bool>
 arePointersGuaranteedNoAlias(llvm::TargetLibraryInfo &TLI, llvm::AAResults &AA,
                              llvm::LoopInfo &LI, llvm::Value *op0,
                              llvm::Value *op1, bool offsetAllowed = false);
-
-// Return true if the module has a triple indicating an nvptx target, false
-// otherwise.
-bool isTargetNVPTX(llvm::Module &M);
 
 static inline std::tuple<llvm::StringRef, llvm::StringRef, llvm::StringRef>
 tripleSplitDollar(llvm::StringRef caller) {

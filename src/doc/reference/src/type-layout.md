@@ -42,11 +42,17 @@ The size of most primitives is given in this table.
 | `f64`             | 8                  |
 | `char`            | 4                  |
 
-r[layout.primitive.size-int]
+r[layout.primitive.size-minimum]
 `usize` and `isize` have a size big enough to contain every address on the target platform. For example, on a 32 bit target, this is 4 bytes, and on a 64 bit target, this is 8 bytes.
 
-r[layout.primitive.align]
+r[layout.primitive.size-align]
+`usize` and `isize` have the same size and alignment.
+
+r[layout.primitive.platform-specific-alignment]
 The alignment of primitives is platform-specific. In most cases, their alignment is equal to their size, but it may be less. In particular, `i128` and `u128` are often aligned to 4 or 8 bytes even though their size is 16, and on many 32-bit platforms, `i64`, `u64`, and `f64` are only aligned to 4 bytes, not 8.
+
+r[layout.primitive.integer-alignment]
+Alignment is guaranteed to be the same for fixed-width signed and unsigned integer variants of the same indicated size --- that is, for a given size `N`, `align_of::<uN>() == align_of::<iN>()`.
 
 r[layout.pointer]
 ## Pointers and references layout
@@ -58,7 +64,7 @@ r[layout.pointer.thin]
 Pointers to sized types have the same size and alignment as `usize`.
 
 r[layout.pointer.unsized]
-Pointers to unsized types are sized. The size and alignment is guaranteed to be at least equal to the size and alignment of a pointer.
+Pointers to unsized types are sized. The size and alignment of a pointer to an unsized type are each guaranteed to be greater than or equal to those of a pointer to a sized type.
 
 > [!NOTE]
 > Though you should not rely on this, all pointers to <abbr title="Dynamically Sized Types">DSTs</abbr> are currently twice the size of the size of `usize` and have the same alignment.
@@ -164,19 +170,15 @@ r[layout.repr.rust.intro]
 The `Rust` representation is the default representation for nominal types without a `repr` attribute. Using this representation explicitly through a `repr` attribute is guaranteed to be the same as omitting the attribute entirely.
 
 r[layout.repr.rust.layout]
-The only data layout guarantees made by this representation are those required for soundness. They are:
+The only data layout guarantees made by this representation are those required for soundness. These are:
 
- 1. The fields are properly aligned.
- 2. The fields do not overlap.
- 3. The alignment of the type is at least the maximum alignment of its fields.
+ 1. The offset of a field is divisible by that field's alignment.
+ 2. The alignment of the type is at least the maximum alignment of its fields.
 
-r[layout.repr.rust.alignment]
-Formally, the first guarantee means that the offset of any field is divisible by that field's alignment.
+r[layout.repr.rust.layout.struct]
+For [structs], it is further guaranteed that the fields do not overlap. That is, the fields can be ordered such that the offset plus the size of any field is less than or equal to the offset of the next field in the ordering. The ordering does not have to be the same as the order in which the fields are specified in the declaration of the type.
 
-r[layout.repr.rust.field-storage]
-The second guarantee means that the fields can be ordered such that the offset plus the size of any field is less than or equal to the offset of the next field in the ordering. The ordering does not have to be the same as the order in which the fields are specified in the declaration of the type.
-
-Be aware that the second guarantee does not imply that the fields have distinct addresses: zero-sized types may have the same address as other fields in the same struct.
+Be aware that this guarantee does not imply that the fields have distinct addresses: zero-sized types may have the same address as other fields in the same struct.
 
 r[layout.repr.rust.unspecified]
 There are no other guarantees of data layout made by this representation.
