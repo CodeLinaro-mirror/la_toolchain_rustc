@@ -36,7 +36,7 @@ cargo-platform = { path = "crates/cargo-platform", version = "0.3.3" }
 cargo-test-macro = { version = "0.4.10", path = "crates/cargo-test-macro" }
 cargo-test-support = { version = "0.11.2", path = "crates/cargo-test-support" }
 cargo-util = { version = "0.2.28", path = "crates/cargo-util" }
-cargo-util-schemas = { version = "0.13.0", path = "crates/cargo-util-schemas" }
+cargo-util-schemas = { version = "0.14.0", path = "crates/cargo-util-schemas" }
 cargo-util-terminal = { version = "0.1.0", path = "crates/cargo-util-terminal" }
 cargo_metadata = "0.23.1"
 clap = "4.6.0"
@@ -84,6 +84,7 @@ openssl-src = "=300.5.4"
 os_info = { version = "3.14.0", default-features = false }
 pasetors = { version = "0.7.8", features = ["v3", "paserk", "std", "serde"] }
 pathdiff = "0.2.3"
+portable-atomic = "1.13.1"
 percent-encoding = "2.3.2"
 proptest = "1.11.0"
 pulldown-cmark = { version = "0.13.3", default-features = false, features = ["html"] }
@@ -138,13 +139,14 @@ all = { level = "allow", priority = -2 }
 correctness = { level = "warn", priority = -1 }
 dbg_macro = "warn"
 disallowed_methods = "warn"
+disallowed_types = "warn"
 print_stderr = "warn"
 print_stdout = "warn"
 self_named_module_files = "warn"
 
 [package]
 name = "cargo"
-version = "0.97.0"
+version = "0.97.2"
 edition.workspace = true
 license.workspace = true
 rust-version = "1.94"  # MSRV:1
@@ -204,6 +206,7 @@ opener.workspace = true
 os_info.workspace = true
 pasetors.workspace = true
 pathdiff.workspace = true
+portable-atomic.workspace = true
 rand.workspace = true
 regex.workspace = true
 rusqlite = { workspace = true, features = ["fallible_uint"] }
@@ -225,6 +228,7 @@ time.workspace = true
 toml = { workspace = true, features = ["std", "serde", "parse", "display", "preserve_order"] }
 toml_edit.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
+tracing-chrome.workspace = true
 tracing-subscriber.workspace = true
 unicase.workspace = true
 unicode-width.workspace = true
@@ -232,9 +236,6 @@ unicode-ident.workspace = true
 url.workspace = true
 walkdir.workspace = true
 winnow.workspace = true
-
-[target.'cfg(target_has_atomic = "64")'.dependencies]
-tracing-chrome.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -299,3 +300,6 @@ http-transport-reqwest = ["gix/blocking-http-transport-reqwest"]
 
 [lints]
 workspace = true
+
+[patch.crates-io]
+libssh2-sys = { path = "third-party/libssh2-sys" }
