@@ -37,10 +37,10 @@ type HttpResult<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("curl multi failed")]
+    #[error(transparent)]
     Multi(#[from] curl::MultiError),
 
-    #[error("curl failed")]
+    #[error(transparent)]
     Easy(#[from] curl::Error),
 
     #[error(
@@ -95,8 +95,30 @@ impl Client {
         }
     }
 
+    /// Perform a blocking HTTP request using this client.
+    /// Does not start an async executor.
+    pub fn request_blocking(&self, request: Request) -> HttpResult<Response> {
+        let mut handle = self.request_helper(request)?;
+        // Configure the handle timeout since we're blocking here and not using the
+        // client-level timeout.
+        self.handle_config.timeout.configure2(&mut handle)?;
+        handle.perform()?;
+        Ok(WorkerServer::process_response(handle))
+    }
+
     /// Perform an HTTP request using this client.
     pub async fn request(&self, request: Request) -> HttpResult<Response> {
+        let handle = self.request_helper(request)?;
+        let (sender, receiver) = oneshot::channel();
+        let req = Message {
+            easy: handle,
+            sender,
+        };
+        self.channel.as_ref().unwrap().send(req).unwrap();
+        receiver.await.unwrap()
+    }
+
+    fn request_helper(&self, request: Request) -> HttpResult<Easy2<Collector>> {
         let url = request.uri().to_string();
         debug!(target: "network::fetch", url);
         let mut collector = Collector::new(self.stats.clone());
@@ -123,8 +145,10 @@ impl Client {
                 handle.put(true)?;
             }
             method => {
-                handle.upload(true)?;
-                handle.in_filesize(body_len as u64)?;
+                if body_len > 0 {
+                    handle.upload(true)?;
+                    handle.in_filesize(body_len as u64)?;
+                }
                 handle.custom_request(method.as_str())?;
             }
         }
@@ -141,14 +165,7 @@ impl Client {
         }
         handle.http_headers(headers)?;
 
-        let (sender, receiver) = oneshot::channel();
-        let req = Message {
-            easy: handle,
-            sender,
-        };
-
-        self.channel.as_ref().unwrap().send(req).unwrap();
-        receiver.await.unwrap()
+        Ok(handle)
     }
 
     /// Returns the number pending bytes across all active transfers.
@@ -242,6 +259,24 @@ impl WorkerServer {
         }
     }
 
+    fn process_response(mut easy: Easy2<Collector>) -> Response {
+        let mut response =
+            std::mem::replace(&mut easy.get_mut().response, Response::new(Vec::new()));
+        if let Ok(status) = easy.response_code()
+            && status != 0
+            && let Ok(status) = http::StatusCode::from_u16(status as u16)
+        {
+            *response.status_mut() = status;
+        }
+        // Would be nice to set HTTP version via `response.version_mut()`, but `curl` doesn't have it exposed.
+        let extensions = Extensions {
+            client_ip: easy.primary_ip().ok().flatten().map(str::to_string),
+            effective_url: easy.effective_url().ok().flatten().map(str::to_string),
+        };
+        response.extensions_mut().insert(extensions);
+        response
+    }
+
     /// Marks the start of a new timeout window.
     fn reset_low_speed_timeout(&mut self) {
         self.low_speed_window_start = Instant::now();
@@ -297,22 +332,8 @@ impl WorkerServer {
                             return;
                         };
                         let result = msg.result_for2(&handle).expect("handle must have a result");
-                        let mut easy = self.multi.remove2(handle).expect("handle must be in multi");
-                        let mut response = std::mem::replace(
-                            &mut easy.get_mut().response,
-                            Response::new(Vec::new()),
-                        );
-                        if let Ok(status) = easy.response_code()
-                            && status != 0
-                            && let Ok(status) = http::StatusCode::from_u16(status as u16)
-                        {
-                            *response.status_mut() = status;
-                        }
-                        // Would be nice to set HTTP version via `response.version_mut()`, but `curl` doesn't have it exposed.
-                        let extensions = Extensions {
-                            client_ip: easy.primary_ip().ok().flatten().map(str::to_string),
-                        };
-                        response.extensions_mut().insert(extensions);
+                        let easy = self.multi.remove2(handle).expect("handle must be in multi");
+                        let response = Self::process_response(easy);
                         let _ = sender.send(result.map(|()| response).map_err(Into::into));
                     });
 
@@ -479,10 +500,12 @@ impl Drop for Collector {
 #[derive(Clone)]
 struct Extensions {
     client_ip: Option<String>,
+    effective_url: Option<String>,
 }
 
 pub trait ResponsePartsExtensions {
     fn client_ip(&self) -> Option<&str>;
+    fn effective_url(&self) -> Option<&str>;
 }
 
 impl ResponsePartsExtensions for http::response::Parts {
@@ -491,6 +514,12 @@ impl ResponsePartsExtensions for http::response::Parts {
             .get::<Extensions>()
             .and_then(|extensions| extensions.client_ip.as_deref())
     }
+
+    fn effective_url(&self) -> Option<&str> {
+        self.extensions
+            .get::<Extensions>()
+            .and_then(|extensions| extensions.effective_url.as_deref())
+    }
 }
 
 impl ResponsePartsExtensions for Response {
@@ -498,6 +527,12 @@ impl ResponsePartsExtensions for Response {
         self.extensions()
             .get::<Extensions>()
             .and_then(|extensions| extensions.client_ip.as_deref())
+    }
+
+    fn effective_url(&self) -> Option<&str> {
+        self.extensions()
+            .get::<Extensions>()
+            .and_then(|extensions| extensions.effective_url.as_deref())
     }
 }
 
